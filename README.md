@@ -1,186 +1,96 @@
-# 🎵 Decky Apple Music
+# 🎵 Apple Music for Steam Deck
 
-A Decky Loader plugin for the Steam Deck that streams Apple Music in the background while you game, using **MusicKit JS** embedded inside Steam's Chromium-based UI.
+A [Decky Loader](https://decky.xyz) plugin that plays **full-length Apple Music** right from the Steam Deck's Quick Access Menu — including while you game. Sign in with your own Apple ID; no developer token or account setup required.
 
----
-
-## How It Works
-
-The plugin embeds a hidden `<iframe>` that loads Apple's official **MusicKit JS v3** library. This keeps audio playback fully within Apple's DRM sandbox (no DRM bypass needed), while the Decky Quick Access panel gives you native-feeling controls — play/pause, skip, seek, shuffle, repeat, volume, and search.
-
-```
-Steam Deck QAM (React/TypeScript)
-        │  postMessage
-        ▼
-  Hidden <iframe> (MusicKit JS v3)
-        │  Apple FairPlay DRM
-        ▼
-  Apple Music CDN ─── audio → PipeWire/PulseAudio
-```
-
----
-
-## Prerequisites
-
-- **Decky Loader** installed ([decky.xyz](https://decky.xyz))
-- **Apple Music subscription**
-- **Apple Developer Program membership** ($99/year) — required to generate a MusicKit developer token
-
----
-
-## Setup: Getting a Developer Token
-
-1. Log in to [developer.apple.com](https://developer.apple.com)
-2. Go to **Certificates, Identifiers & Profiles → Keys**
-3. Click **+** to create a new key
-4. Enable **MusicKit** and click **Continue → Register**
-5. Download the `.p8` private key file — **save it, you can only download it once**
-6. Note your **Key ID** and **Team ID** (top right of your developer account)
-
-### Generate the JWT token
-
-On your PC (requires Node.js):
-
-```bash
-npm install -g jsonwebtoken
-```
-
-```js
-// generate-token.js
-const jwt = require("jsonwebtoken");
-const fs  = require("fs");
-
-const privateKey = fs.readFileSync("AuthKey_XXXXXXXXXX.p8");
-const teamId     = "YOUR_TEAM_ID";
-const keyId      = "YOUR_KEY_ID";
-
-const token = jwt.sign({}, privateKey, {
-  algorithm:  "ES256",
-  expiresIn:  "180d",       // max 6 months
-  issuer:     teamId,
-  header: { alg: "ES256", kid: keyId },
-});
-
-console.log(token);
-```
-
-```bash
-node generate-token.js
-```
-
-Copy the printed JWT — that's your developer token.
-
----
-
-## Installation
-
-### Option A — Manual install (sideload)
-
-1. Build the plugin (see Development section below)
-2. Copy the output folder to your Steam Deck:
-   ```bash
-   scp -r decky-apple-music deck@steamdeck:/home/deck/homebrew/plugins/
-   ```
-3. Restart Decky Loader or reboot into Game Mode
-
-### Option B — Install from ZIP
-
-1. Download the latest release ZIP from the Releases page
-2. In Desktop Mode, open Decky Loader settings → **Install from ZIP**
-
----
-
-## First Run
-
-1. Open the Quick Access Menu (⋯) → tap the **Apple Music** plugin (🎵 icon)
-2. Paste your **Developer Token** and set your **Storefront** (e.g. `us`, `gb`, `jp`, `au`)
-3. Tap **Save & Connect**
-4. Re-open the plugin and tap **Sign in with Apple ID** — a browser popup will appear
-5. Complete the sign-in flow — you'll be redirected back automatically
-6. Start listening 🎶
+> **Beta.** Expect rough edges. Requires an active Apple Music subscription.
 
 ---
 
 ## Features
 
-| Feature | Status |
+| | |
 |---|---|
-| Play / Pause | ✅ |
-| Skip forward / back | ✅ |
-| Seek (tap progress bar) | ✅ |
-| Shuffle | ✅ |
-| Repeat (none / all / one) | ✅ |
-| Volume control | ✅ |
-| Search catalog (songs) | ✅ |
-| Album artwork | ✅ |
-| Background playback while gaming | ✅ |
-| Persisted login between sessions | ✅ |
-| System volume sync (pactl) | ✅ |
+| ▶️ Full-length DRM playback (not 30s previews) | Widevine via a bundled castlabs Electron engine |
+| 🎧 Background playback | Keeps playing when the QAM closes and games launch |
+| 🔐 In-plugin Apple ID sign-in | Email / password / 2FA typed right in the QAM |
+| 🔎 Search, library, For You, artist radio | Browse and queue anything |
+| ❤️ Favorite + Add to Library | |
+| 🔀 Shuffle / repeat / seek / volume | Native-feeling transport controls |
+| 🎚️ Music level trim | Balance music against game loudness (default −8 dB) |
+| 🎮 Auto-duck for games | Lowers music when game audio gets loud |
+| ⏭️ Autoplay similar songs | Optional; off by default |
+
+---
+
+## Install (testers)
+
+1. Install **[Decky Loader](https://decky.xyz)** if you haven't.
+2. In Decky → **Settings** → enable **Developer mode**.
+3. Go to the **Developer** tab → **Install Plugin from URL** and paste:
+   ```
+   https://github.com/BrielleG116/decky-apple-music/releases/latest/download/apple-music-plugin.zip
+   ```
+4. Open **Apple Music** in the QAM. On first run it shows **Player setup → Install Player** — tap it (a one-time ~120 MB download of the playback engine).
+5. **Sign in** with your Apple ID (you'll get a 2FA prompt on your trusted device).
+6. Start listening 🎶
+
+The plugin itself is tiny; the large playback engine is downloaded on first run rather than bundled.
+
+---
+
+## How it works
+
+Steam's built-in browser can't decrypt Apple Music (its Chromium has no Widevine CDM), so playback runs in a **hidden, bundled [castlabs Electron](https://github.com/castlabs/electron-releases) process** that *does* have Widevine. The Decky panel drives it, and audio goes out through PipeWire — surviving the QAM closing and games launching.
+
+```
+ Steam QAM panel (React/TS)
+        │  Decky callables
+        ▼
+ Python backend (main.py) ──CDP──►  Hidden castlabs Electron player
+        │                              │  MusicKit JS + Widevine
+        │                              ▼
+        └─ browsing/API proxied ──►  Apple Music  ──audio──► PipeWire
+```
+
+- **No developer token is shipped.** Apple's own web-player token is harvested at runtime; the frontend routes all catalog/library calls through the player (which carries the correct origin).
+- **Your credentials stay on your Deck.** Sign-in is driven locally into Apple's login; only the resulting media-user-token is stored.
 
 ---
 
 ## Development
 
-### Requirements
-
-- Node.js ≥ 16.14
-- pnpm v9: `npm i -g pnpm@9`
-- Docker (for Python backend compilation, optional)
-
-### Build
-
 ```bash
-pnpm install
-pnpm build
+npm install
+npm run build          # builds dist/index.js
+./package-plugin.sh    # -> apple-music-plugin.zip (Decky "Install from ZIP")
 ```
 
-### Deploy to Steam Deck (hot-reload)
-
-```bash
-# In .vscode/tasks.json the "deploy" task handles this, or manually:
-rsync -av --delete dist/ main.py plugin.json package.json \
-  deck@steamdeck:/home/deck/homebrew/plugins/Apple\ Music/
-```
-
-Then restart Decky from the QAM settings or reboot.
-
-### Project Structure
+Project layout:
 
 ```
-decky-apple-music/
-├── src/
-│   └── index.tsx          # React UI + MusicKit iframe bridge
-├── main.py                # Python backend (settings, system volume)
-├── plugin.json            # Decky metadata
-├── package.json
-├── rollup.config.js
-└── tsconfig.json
+├── src/index.tsx        # React QAM UI (Steam CEF)
+├── main.py              # Python backend: player control (CDP), settings, install
+├── ducker.py            # Auto-duck daemon
+├── player/              # castlabs Electron player (main.js + MusicKit page)
+├── plugin.json          # Decky metadata
+└── package-plugin.sh    # Builds the distributable plugin zip
 ```
+
+Maintainer distribution steps (creating releases, updating the player) are in **[DISTRIBUTION.md](DISTRIBUTION.md)**.
 
 ---
 
 ## Troubleshooting
 
-**MusicKit never loads**
-- Check that your developer token hasn't expired (max 6 months)
-- Make sure the Steam Deck has internet access — MusicKit JS is loaded from Apple's CDN
-
-**Sign-in popup doesn't appear / closes immediately**
-- Try opening the plugin fresh after a full Deck reboot
-- Apple's auth popup requires pop-ups to not be blocked in the CEF browser
-
-**Audio plays but no sound**
-- Check the Deck volume isn't muted — MusicKit JS controls its own volume within PipeWire
-- Try the volume slider in the plugin
-
-**Search returns no results**
-- Confirm your storefront code is correct (e.g. `us` not `US`)
-- Apple Music search requires an active subscription
+- **Stuck on "Install Player" / download fails** — make sure the Deck is online; the engine downloads from GitHub Releases.
+- **Sign-in says "Check the account information"** — wrong Apple ID or password; try again.
+- **Only previews / no full playback** — an active Apple Music subscription is required.
+- **Music much louder than the game** — that's normal loudness mastering; use the **Music level** slider in Settings (or the volume slider).
 
 ---
 
 ## License
 
-MIT — see LICENSE
+MIT — see [LICENSE](LICENSE).
 
-> **Note:** This plugin uses Apple's official MusicKit JS API and does not circumvent DRM. Usage is subject to [Apple's MusicKit developer terms](https://developer.apple.com/musickit/).
+> This plugin uses Apple's official MusicKit and a Widevine-enabled Electron build for DRM playback; it does **not** circumvent DRM. Use is subject to [Apple's MusicKit terms](https://developer.apple.com/musickit/). Not affiliated with or endorsed by Apple.

@@ -1522,12 +1522,50 @@ class Plugin:
             decky.logger.error(f"[DeckyAM] install_player failed: {e}")
             self._install_state = {"state": "error", "pct": 0, "message": str(e)}
 
+    def _download_ssl_context(self):
+        """SSL context for the player download. Decky's bundled Python often
+        can't locate the system CA store ('unable to get local issuer
+        certificate'), so load SteamOS's CA bundle explicitly. Falls back to an
+        unverified context — safe here because the download is pinned by
+        PLAYER_SHA256, so a tampered/MITM'd file is rejected regardless of TLS."""
+        import ssl
+        ctx = ssl.create_default_context()
+        try:
+            has_ca = ctx.cert_store_stats().get("x509_ca", 0) > 0
+        except Exception:
+            has_ca = False
+        if not has_ca:
+            for ca in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem",
+                       "/etc/pki/tls/certs/ca-bundle.crt"):
+                if os.path.exists(ca):
+                    try:
+                        ctx.load_verify_locations(ca)
+                        has_ca = True
+                        break
+                    except Exception:
+                        pass
+        if not has_ca:
+            ctx = ssl._create_unverified_context()
+        return ctx
+
+    def _open_download(self, req, timeout=60):
+        import urllib.request, ssl
+        try:
+            return urllib.request.urlopen(req, timeout=timeout, context=self._download_ssl_context())
+        except ssl.SSLError:
+            # Verification still failed in this runtime — proceed unverified;
+            # the pinned sha256 below is what actually guarantees integrity.
+            return urllib.request.urlopen(req, timeout=timeout,
+                                          context=ssl._create_unverified_context())
+
     def _install_blocking(self):
         """Download the player tarball, verify it, and extract it. Runs in a
         worker thread; updates self._install_state as it goes."""
         import urllib.request, tarfile, hashlib, shutil
         if not PLAYER_DOWNLOAD_URL or "<OWNER>" in PLAYER_DOWNLOAD_URL:
             raise RuntimeError("Player download URL is not configured yet")
+        if not PLAYER_SHA256:
+            raise RuntimeError("No PLAYER_SHA256 pin — refusing to install unverified")
         data_dir = self.chrome.player_dir
         os.makedirs(data_dir, exist_ok=True)
         tmp = os.path.join(data_dir, ".player-download.tar.gz")
@@ -1535,7 +1573,7 @@ class Plugin:
         # Download with progress + running checksum.
         req = urllib.request.Request(PLAYER_DOWNLOAD_URL, headers={"User-Agent": "DeckyAM"})
         sha = hashlib.sha256()
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with self._open_download(req, timeout=60) as r:
             total = int(r.headers.get("Content-Length", 0) or 0)
             got = 0
             with open(tmp, "wb") as f:

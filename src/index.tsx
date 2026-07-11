@@ -170,25 +170,54 @@ async function loadMusicKit(devToken: string, storefront: string): Promise<any> 
     const drm = await checkDRM();
     const canPlayFull = drm.includes("OK");
     
-    mkInstance = await MK.configure({
+    const configured = await MK.configure({
       developerToken: devToken,
       app: { name: "Decky Apple Music", build: "1.0.0" },
       storefrontId: storefront,
       previewOnly: !canPlayFull,
     });
-    // Route all catalog/library API calls through the player (which holds
-    // Apple's harvested token and the correct Origin), so browsing needs no
-    // developer token of ours. Playback already goes through the backend.
-    try {
-      if (mkInstance.api) mkInstance.api.music = (path: string, params?: any, options?: any) => amApi(path, params, options);
-    } catch (e) { console.warn("[DeckyAM] api.music override failed:", e); }
-    // Hard-override to ensure missing DRM doesn't cause a crash
-    mkInstance.previewOnly = !canPlayFull;
-    if (mkInstance.player) mkInstance.player.previewOnly = !canPlayFull;
-    // Force playback settings
-    mkInstance.playbackConnectivity = 'broadband';
-    mkInstance.bitrate = 256; 
-    console.log("[DeckyAM] MusicKit Configured. previewOnly:", mkInstance.previewOnly);
+    // Playback settings (actual playback runs on the backend player daemon).
+    try { configured.previewOnly = !canPlayFull; } catch {}
+    try { if (configured.player) configured.player.previewOnly = !canPlayFull; } catch {}
+    try { configured.playbackConnectivity = 'broadband'; } catch {}
+    try { configured.bitrate = 256; } catch {}
+
+    // Route all catalog/library API calls through the player, which holds
+    // Apple's harvested token AND rewrites the Origin to music.apple.com. The
+    // frontend's own instance can't: that harvested token is origin-locked, so
+    // direct calls from Steam's CEF get 401.
+    //
+    // MusicKit's `api.music` is a read-only, non-configurable own property, so it
+    // can't be reassigned, redefined, OR overridden via a Proxy on `api` (the
+    // Proxy invariant forces the real value). Instead we override one level up:
+    // `mk.api` is an inherited getter, so a Proxy on the instance may return a
+    // surrogate `api` object whose `music` is ours and whose other members
+    // delegate to the real api. Everything else on the instance passes through to
+    // the real object (receiver = target so getters / private #fields work).
+    const realApi = configured.api;
+    const musicProxy = (path: string, params?: any, options?: any) => amApi(path, params, options);
+    const apiSurrogate = new Proxy({ music: musicProxy } as any, {
+      get(_t: any, p: any) {
+        if (p === "music") return musicProxy;
+        const v = (realApi as any)[p];
+        return typeof v === "function" ? v.bind(realApi) : v;
+      },
+    });
+    mkInstance = new Proxy(configured, {
+      get(t: any, p: any) {
+        if (p === "api") return apiSurrogate;
+        // Proxy invariant: non-configurable, non-writable own data props must be
+        // returned as-is.
+        const d = Object.getOwnPropertyDescriptor(t, p);
+        if (d && !d.configurable && !d.writable && !("get" in d)) return d.value;
+        const v = Reflect.get(t, p, t);
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+      set(t: any, p: any, v: any) {
+        try { return Reflect.set(t, p, v, t); } catch (_) { t[p] = v; return true; }
+      },
+    });
+    console.log("[DeckyAM] MusicKit configured (api.music proxied through player).");
     return mkInstance;
   } finally { mkLoading = false; }
 }
@@ -1820,6 +1849,9 @@ const Icon = () => (
             console.log("[DeckyAM] Global MusicKit initialized successfully natively.");
         } catch (e) {
             console.error("[DeckyAM] Global MusicKit init failed:", e);
+            // Clear the guard so a later attempt (e.g. after the player is
+            // installed on first run) can re-initialize instead of being stuck.
+            try { delete (window as any).GlobalMusicKitPromise; } catch (_) {}
         }
     })();
 })();

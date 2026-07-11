@@ -1,0 +1,28 @@
+# Secrets / local notes — never publish
+CONVERSATION_HANDOFF.json
+.claude/
+*.local
+
+# Build output / artifacts
+dist/
+release/
+*.zip
+*.tar.gz
+
+# Backups / old copies
+backup-working/
+*.backup_stable
+*.ui_stable
+
+# Dependencies
+node_modules/
+player/node_modules/
+player/out/
+
+# Python / OS cruft
+__pycache__/
+*.pyc
+.DS_Store
+
+# Lockfiles (optional; keep package-lock.json if you prefer)
+pnpm-lock.yaml

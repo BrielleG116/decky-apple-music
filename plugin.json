@@ -1,0 +1,10 @@
+{
+  "name": "Apple Music",
+  "author": "jeffmartinez",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "description": "Full-length Apple Music playback from the Steam Deck Quick Access Menu, with in-plugin Apple ID sign-in and Widevine DRM.",
+    "tags": ["music", "apple music", "audio"]
+  }
+}

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>DeckyAM Player</title>
+  <style>
+    body { background: #111; color: #eee; font-family: sans-serif; padding: 16px; }
+    #status { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h3>DeckyAM Player</h3>
+  <div id="status">booting…</div>
+  <script>
+    // Boot state is exposed on window so the plugin backend can poll it via CDP:
+    //   window.__DECKYAM__ = { ready, error, drm }
+    window.__DECKYAM__ = { ready: false, error: null, drm: null };
+    const statusEl = document.getElementById("status");
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+      console.log("[boot] " + msg);
+    }
+
+    async function checkWidevine() {
+      try {
+        await navigator.requestMediaKeySystemAccess("com.widevine.alpha", [{
+          initDataTypes: ["cenc"],
+          audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+        }]);
+        window.__DECKYAM__.drm = "widevine-ok";
+        return true;
+      } catch (e) {
+        window.__DECKYAM__.drm = "widevine-missing: " + e.name;
+        return false;
+      }
+    }
+
+    function loadMusicKit() {
+      return new Promise((resolve, reject) => {
+        if (window.MusicKit) return resolve();
+        document.addEventListener("musickitloaded", () => resolve(), { once: true });
+        const s = document.createElement("script");
+        s.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
+        s.async = true;
+        s.onerror = () => reject(new Error("failed to load musickit.js"));
+        document.head.appendChild(s);
+        setTimeout(() => reject(new Error("musickit.js load timeout")), 30000);
+      });
+    }
+
+    async function boot() {
+      setStatus("checking Widevine…");
+      const drmOk = await checkWidevine();
+      setStatus("DRM: " + window.__DECKYAM__.drm + "\nfetching config…");
+
+      const cfg = await (await fetch("/config")).json();
+      if (!cfg.developerToken) throw new Error("no developerToken in config");
+
+      setStatus("loading MusicKit JS…");
+      await loadMusicKit();
+
+      setStatus("configuring MusicKit…");
+      await MusicKit.configure({
+        developerToken: cfg.developerToken,
+        app: { name: "DeckyAM", build: "1.0.0" },
+      });
+      const mk = MusicKit.getInstance();
+      if (cfg.musicUserToken) {
+        try { mk.musicUserToken = cfg.musicUserToken; } catch (e) {
+          console.log("[boot] could not set musicUserToken: " + e);
+        }
+      }
+      // Optionally keep playing similar music when the queue ends (iOS-style
+      // autoplay). Controlled by a setting; off by default.
+      try { mk.autoplayEnabled = !!cfg.autoplay; } catch (e) {
+        console.log("[boot] could not set autoplay: " + e);
+      }
+      // Apply the music-level trim as the initial volume so music sits closer to
+      // game loudness from the first track (slider = full = this trimmed level).
+      try {
+        var trimDb = (typeof cfg.musicTrimDb === "number") ? cfg.musicTrimDb : -8;
+        mk.volume = Math.pow(10, Math.max(-24, Math.min(0, trimDb)) / 20);
+      } catch (e) { console.log("[boot] could not set music trim: " + e); }
+
+      window.__DECKYAM__.ready = true;
+      setStatus(
+        "ready\nDRM: " + window.__DECKYAM__.drm +
+        "\nauthorized: " + Boolean(mk.musicUserToken) +
+        (drmOk ? "" : "\nWARNING: Widevine unavailable — playback will be previews only")
+      );
+    }
+
+    boot().catch((e) => {
+      window.__DECKYAM__.error = String(e);
+      setStatus("BOOT ERROR: " + e);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "deckyam-player",
+  "version": "1.0.0",
+  "description": "Hidden Widevine-enabled Apple Music player daemon for the DeckyAM plugin",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --show",
+    "build:linux": "node build.js"
+  },
+  "devDependencies": {
+    "electron": "https://github.com/castlabs/electron-releases#v43.0.0+wvcus",
+    "@electron/packager": "^18.3.6"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "decky-apple-music",
+  "version": "1.0.21",
+  "description": "Apple Music for Steam Deck via Decky Loader",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "dependencies": {
+    "@decky/api": "*",
+    "@decky/ui": "*"
+  },
+  "devDependencies": {
+    "@decky/rollup": "*",
+    "@types/react": "^18.0.0",
+    "rollup": "^4.59.0",
+    "typescript": "^5.0.0"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "ignoreMissing": [
+        "react",
+        "react-dom"
+      ]
+    }
+  }
+}

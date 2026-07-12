@@ -91,6 +91,9 @@ Maintainer distribution steps (creating releases, updating the player) are in **
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**[PolyForm Noncommercial License 1.0.0](LICENSE)** — free to use, modify, and
+share for **non-commercial** purposes, and you **must keep the attribution
+notice**. You may **not** sell it or use it commercially, or strip the credit.
+For a commercial license, contact the author.
 
 > This plugin uses Apple's official MusicKit and a Widevine-enabled Electron build for DRM playback; it does **not** circumvent DRM. Use is subject to [Apple's MusicKit terms](https://developer.apple.com/musickit/). Not affiliated with or endorsed by Apple.

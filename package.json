@@ -2,6 +2,7 @@
   "name": "decky-apple-music",
   "version": "1.0.21",
   "description": "Apple Music for Steam Deck via Decky Loader",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "build": "rollup -c",

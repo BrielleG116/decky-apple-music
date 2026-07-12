@@ -870,13 +870,19 @@ class Plugin:
         """Write the ducker daemon's live config from plugin settings."""
         if data is None:
             data = self._read_settings()
+        # Sensitivity (0..1) maps to the trigger threshold: higher = ducks on
+        # quieter game audio. 0.5 ~ the previous fixed 0.05 threshold.
+        sens = max(0.0, min(1.0, float(data.get("duckSensitivity", 0.5))))
+        threshold = round(0.10 - sens * 0.092, 4)  # 0.10 (low) .. 0.008 (high)
         cfg = {
             "enabled": bool(data.get("duckEnabled", False)),
             "depth": float(data.get("duckDepth", 0.0)),
             "releaseMs": float(data.get("duckRelease", 2500)),
             "attackMs": float(data.get("duckAttack", 45)),
-            "threshold": 0.05,
-            "loudRef": 0.10,
+            "threshold": threshold,
+            "loudRef": round(threshold + 0.05, 4),
+            "speechOnly": bool(data.get("duckSpeechOnly", False)),
+            "mutedStreams": list(data.get("duckMutedStreams", []) or []),
         }
         try:
             os.makedirs(self.chrome.player_dir, exist_ok=True)
@@ -934,6 +940,12 @@ class Plugin:
                 data["duckRelease"] = float(payload["release"])
             if "attack" in payload:
                 data["duckAttack"] = float(payload["attack"])
+            if "sensitivity" in payload:
+                data["duckSensitivity"] = float(payload["sensitivity"])
+            if "speechOnly" in payload:
+                data["duckSpeechOnly"] = bool(payload["speechOnly"])
+            if "mutedStreams" in payload:
+                data["duckMutedStreams"] = list(payload["mutedStreams"] or [])
             with open(self.settingsFilePath, "w") as f:
                 json.dump(data, f)
             self._write_duck_config(data)
@@ -945,6 +957,26 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"[DeckyAM] set_duck error: {e}")
             return {"success": False, "error": str(e)}
+
+    async def list_duck_streams(self):
+        """Streams the ducker currently detects (from duck-streams.json) plus
+        which are muted — for the per-stream toggle UI. Only meaningful while a
+        game is producing audio and ducking is enabled."""
+        try:
+            import time as _t
+            streams = []
+            path = os.path.join(self.chrome.player_dir, "duck-streams.json")
+            try:
+                with open(path) as f:
+                    d = json.load(f)
+                if (_t.time() - float(d.get("ts", 0))) < 6.0:
+                    streams = d.get("streams", []) or []
+            except Exception:
+                streams = []
+            muted = list(self._read_settings().get("duckMutedStreams", []) or [])
+            return {"streams": streams, "muted": muted}
+        except Exception as e:
+            return {"streams": [], "muted": [], "error": str(e)}
 
     async def set_autoplay(self, *args):
         """Enable/disable MusicKit autoplay (queueing similar songs after an
@@ -998,7 +1030,10 @@ class Plugin:
             "duckEnabled": bool(data.get("duckEnabled", False)),
             "duckDepth": float(data.get("duckDepth", 0.0)),
             "duckRelease": float(data.get("duckRelease", 2500)),
-            "duckAttack": float(data.get("duckAttack", 45))
+            "duckAttack": float(data.get("duckAttack", 45)),
+            "duckSensitivity": float(data.get("duckSensitivity", 0.5)),
+            "duckSpeechOnly": bool(data.get("duckSpeechOnly", False)),
+            "duckMutedStreams": list(data.get("duckMutedStreams", []) or [])
         }
 
     async def save_settings(self, *args, **kwargs):

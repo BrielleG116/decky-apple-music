@@ -23,7 +23,8 @@ const getSettings  = callable<[], { developerToken: string; storefront: string; 
 const saveSettings = callable<[{ developerToken: string; storefront: string; musicUserToken: string; trackToasts?: boolean }], void>("save_settings");
 const setShuffleBackend = callable<[boolean], { success: boolean }>("set_shuffle");
 const setRepeatBackend = callable<[number], { success: boolean }>("set_repeat");
-const setDuck = callable<[{ enabled?: boolean; depth?: number; release?: number; attack?: number }], { success: boolean; enabled?: boolean }>("set_duck");
+const setDuck = callable<[{ enabled?: boolean; depth?: number; release?: number; attack?: number; sensitivity?: number; speechOnly?: boolean; mutedStreams?: string[] }], { success: boolean; enabled?: boolean }>("set_duck");
+const listDuckStreams = callable<[], { streams: { key: string; name: string }[]; muted: string[] }>("list_duck_streams");
 const setAutoplay = callable<[boolean], { success: boolean; enabled?: boolean }>("set_autoplay");
 const setMusicTrim = callable<[{ db: number; volume?: number }], { success: boolean; db?: number }>("set_music_trim");
 const playerInstalled = callable<[], { installed: boolean; version: string; latest: string }>("player_installed");
@@ -1212,6 +1213,10 @@ const Content = () => {
   const [duckDepth, setDuckDepth] = useState(0.0);
   const [duckRelease, setDuckRelease] = useState(2500);
   const [duckAttack, setDuckAttack] = useState(45);
+  const [duckSensitivity, setDuckSensitivity] = useState(0.5);
+  const [duckSpeechOnly, setDuckSpeechOnly] = useState(false);
+  const [duckMutedStreams, setDuckMutedStreams] = useState<string[]>([]);
+  const [duckStreams, setDuckStreams] = useState<{ key: string; name: string }[]>([]);
   const [loved, setLoved] = useState(false);
   const [inLib, setInLib] = useState(false);
   const [actionBusy, setActionBusy] = useState<"love"|"add"|null>(null);
@@ -1240,6 +1245,25 @@ const Content = () => {
   }, []);
 
   const [showSettings, setShowSettings] = useState(false);
+
+  // While the duck settings are open, poll the streams the ducker detects so the
+  // per-stream toggles reflect the current game's audio streams.
+  useEffect(() => {
+    if (!showSettings || !duckEnabled) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await listDuckStreams();
+        if (alive && r) {
+          setDuckStreams(r.streams || []);
+          if (Array.isArray(r.muted)) setDuckMutedStreams(r.muted);
+        }
+      } catch {}
+    };
+    poll();
+    const iv = setInterval(poll, 2500);
+    return () => { alive = false; clearInterval(iv); };
+  }, [showSettings, duckEnabled]);
   const [tokenInput] = useState("");
   const [sfInput, setSfInput] = useState(DEFAULT_STOREFRONT);
   const [mutInput, setMutInput] = useState("");
@@ -1343,6 +1367,9 @@ const Content = () => {
         setDuckDepth((s as any).duckDepth ?? 0.0);
         setDuckRelease((s as any).duckRelease ?? 2500);
         setDuckAttack((s as any).duckAttack ?? 45);
+        setDuckSensitivity((s as any).duckSensitivity ?? 0.5);
+        setDuckSpeechOnly((s as any).duckSpeechOnly ?? false);
+        setDuckMutedStreams((s as any).duckMutedStreams ?? []);
         
         if (mut && (!s.musicUserToken || s.musicUserToken !== mut)) {
            console.log("[DeckyAM] Synchronizing token to backend settings...");
@@ -1573,6 +1600,46 @@ const Content = () => {
                   onChange={(e:React.ChangeEvent<HTMLInputElement>)=>{ const r=parseFloat(e.target.value); setDuckRelease(r); setDuck({ enabled:true, depth:duckDepth, release:r, attack:duckAttack }).catch(()=>{}); }}
                   style={{flex:1,accentColor:"#fa2d48",height:4}} />
               </FocusHighlight>
+
+              <div style={{fontSize:11,color:"#ffffff99",display:"flex",justifyContent:"space-between",marginTop:6}}><span>Sensitivity</span><span>{Math.round(duckSensitivity*100)}%</span></div>
+              <FocusHighlight style={{display:"flex",alignItems:"center",padding:"2px 0"}}>
+                <input type="range" min={0} max={1} step={0.01} value={duckSensitivity}
+                  onInput={(e:React.FormEvent<HTMLInputElement>)=>setDuckSensitivity(parseFloat((e.target as HTMLInputElement).value))}
+                  onChange={(e:React.ChangeEvent<HTMLInputElement>)=>{ const v=parseFloat(e.target.value); setDuckSensitivity(v); setDuck({ enabled:true, sensitivity:v }).catch(()=>{}); }}
+                  style={{flex:1,accentColor:"#fa2d48",height:4}} />
+              </FocusHighlight>
+
+              <FocusHighlight onActivate={async ()=>{ const next=!duckSpeechOnly; setDuckSpeechOnly(next); try{ await setDuck({ enabled:true, speechOnly:next }); }catch{} }}
+                style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",marginTop:12}}>
+                <div style={{maxWidth:"78%"}}>
+                  <div style={{fontSize:12,color:"#fff"}}>Duck on dialogue only</div>
+                  <div style={{fontSize:10,color:"#ffffff66",marginTop:2,lineHeight:1.3}}>Experimental — reacts to speech-like audio, not music/SFX</div>
+                </div>
+                <div style={{width:36,height:20,borderRadius:10,background:duckSpeechOnly?"#fa2d48":"rgba(255,255,255,0.15)",position:"relative",flexShrink:0}}>
+                  <div style={{width:16,height:16,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:duckSpeechOnly?18:2,transition:"left 0.2s"}} />
+                </div>
+              </FocusHighlight>
+
+              <div style={{fontSize:11,color:"#ffffff99",marginTop:12,marginBottom:3}}>Trigger streams</div>
+              {duckStreams.length === 0 ? (
+                <div style={{fontSize:10,color:"#ffffff55",lineHeight:1.4}}>Play a game — its audio streams will appear here so you can toggle which ones trigger ducking.</div>
+              ) : (
+                duckStreams.map((st)=>{
+                  const on = !duckMutedStreams.includes(st.key);
+                  return (
+                    <FocusHighlight key={st.key} onActivate={async ()=>{
+                      const next = on ? [...duckMutedStreams, st.key] : duckMutedStreams.filter(k=>k!==st.key);
+                      setDuckMutedStreams(next);
+                      try { await setDuck({ enabled:true, mutedStreams: next }); } catch {}
+                    }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"4px 0"}}>
+                      <div style={{fontSize:11,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"75%"}}>{st.name}</div>
+                      <div style={{width:32,height:18,borderRadius:9,background:on?"#fa2d48":"rgba(255,255,255,0.15)",position:"relative",flexShrink:0}}>
+                        <div style={{width:14,height:14,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:on?16:2,transition:"left 0.2s"}} />
+                      </div>
+                    </FocusHighlight>
+                  );
+                })
+              )}
             </div>
           )}
         </div>

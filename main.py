@@ -1205,15 +1205,29 @@ class Plugin:
             # Open (or reuse) the hidden, plugin-driven sign-in window.
             self.chrome._player_http("/signin?hidden=1")
 
-            # Wait for MusicKit to load, then kick off authorize().
+            # Wait for MusicKit to load, then kick off authorize(). Give slow /
+            # flaky connections plenty of time, and reload the window once if the
+            # page seems stalled (MusicKit still absent well into the wait).
             started = None
-            for _ in range(30):
+            loop = asyncio.get_event_loop()
+            begin = loop.time()
+            deadline = begin + 45
+            reloaded = False
+            while loop.time() < deadline:
                 started = self.chrome._login_drive("start")
                 if started.get("ready"):
                     break
+                if not reloaded and (loop.time() - begin) > 18:
+                    # The initial page load may have stalled — recreate the
+                    # sign-in window fresh (re-loads music.apple.com). Uses the
+                    # page server so it works on any installed player build.
+                    self.chrome._player_http("/signin?hidden=1")
+                    reloaded = True
                 await asyncio.sleep(0.7)
             if not (started and started.get("ready")):
-                return {"step": "error", "error": "MusicKit did not load in sign-in window", "detail": started}
+                return {"step": "error",
+                        "error": "Couldn't reach Apple's sign-in. Check the Deck's internet connection and try again.",
+                        "detail": started}
             if started.get("authorized"):
                 return await self._finish_login()
 

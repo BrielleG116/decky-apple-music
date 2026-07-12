@@ -139,7 +139,23 @@ function openSignIn(opts = {}) {
       } catch (e) { log("STEAM_GAME atom set failed:", String(e)); }
     });
   }
-  w.loadURL("https://music.apple.com/us/browse").catch((e) => log("signin load:", String(e)));
+  // Load music.apple.com, retrying transient failures — a tester's first run
+  // can hit flaky network, and a single silent load failure would otherwise
+  // leave MusicKit never loading ("MusicKit did not load in sign-in window").
+  const SIGNIN_URL = "https://music.apple.com/us/browse";
+  let signInLoadAttempts = 0;
+  const loadSignIn = () => {
+    signInLoadAttempts++;
+    w.loadURL(SIGNIN_URL).catch((e) => log("signin load attempt", signInLoadAttempts, "failed:", String(e)));
+  };
+  w.webContents.on("did-fail-load", (_e, errorCode, errorDesc, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return; // -3 = ERR_ABORTED (superseded nav)
+    log("signin did-fail-load:", errorCode, errorDesc, validatedURL);
+    if (signInLoadAttempts < 6 && !w.isDestroyed()) {
+      setTimeout(() => { if (!w.isDestroyed()) loadSignIn(); }, 2000);
+    }
+  });
+  loadSignIn();
 
   // Poll for a captured media-user-token for as long as the window is open (no
   // fixed deadline — a hidden driven login or a slow manual login can take a
@@ -269,7 +285,8 @@ function loginActionScript(action, value) {
     start: `
       try {
         const mk = window.MusicKit && MusicKit.getInstance();
-        if (!mk) return { ok: false, ready: false, reason: 'no MusicKit yet' };
+        if (!mk) return { ok: false, ready: false, reason: 'no MusicKit yet',
+          hasWindowMK: !!window.MusicKit, url: location.href, readyState: document.readyState };
         if (mk.isAuthorized) return { ok: true, ready: true, authorized: true };
         if (!window.__damAuth) {
           window.__damAuth = true;
@@ -364,6 +381,11 @@ function loginActionScript(action, value) {
 async function driveLogin(action, value) {
   const t = loginTarget();
   if (!t) return { ok: false, error: "no signin window" };
+  // Re-load the sign-in page (used if MusicKit never appeared — a stalled load).
+  if (action === "reload") {
+    try { t.loadURL("https://music.apple.com/us/browse"); return { ok: true, reloaded: true }; }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  }
   const script = loginActionScript(action, value);
   if (!script) return { ok: false, error: "unknown action: " + action };
   // authorize() may require a user gesture; grant one for the start action.

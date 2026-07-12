@@ -756,8 +756,18 @@ class ChromeController:
                         }} catch(e) {{}}
                     }}
                     
-                    if (mediaType.includes('playlist') || mediaId.startsWith('p.')) {{
-                        // Try fetching catalog relationship for library playlist
+                    if (mediaType.includes('playlist') || mediaId.startsWith('p.') || mediaId.startsWith('pl.')) {{
+                        // A library/catalog playlist id works directly in setQueue.
+                        // This is the reliable path for custom, smart, and
+                        // catalog-backed playlists (their tracks often have no
+                        // per-track catalogId, so queuing songs individually fails).
+                        try {{
+                            await mk.setQueue({{playlist: mediaId}});
+                            await mk.play();
+                            return {{success: true}};
+                        }} catch(e) {{}}
+
+                        // Fallback: resolve a library playlist to its catalog twin.
                         try {{
                             const res = await mk.api.music('/v1/me/library/playlists/' + mediaId + '/catalog');
                             const catalogId = res?.data?.data?.[0]?.id;
@@ -767,26 +777,33 @@ class ChromeController:
                                 return {{success: true}};
                             }}
                         }} catch(e) {{}}
-                        
-                        // Fallback: try fetching playlist tracks and queuing them
+
+                        // Fallback: queue the playlist's tracks by catalog id.
                         try {{
-                            const res = await mk.api.music('/v1/me/library/playlists/' + mediaId + '/tracks');
+                            const res = await mk.api.music('/v1/me/library/playlists/' + mediaId + '/tracks', {{ limit: 100 }});
                             const tracks = res?.data?.data ?? [];
-                            if (tracks.length > 0) {{
-                                const catalogIds = tracks
-                                    .map(t => t.attributes?.playParams?.catalogId)
-                                    .filter(Boolean);
-                                if (catalogIds.length > 0) {{
-                                    await mk.setQueue({{songs: catalogIds}});
-                                    await mk.play();
-                                    return {{success: true}};
-                                }}
+                            const catalogIds = tracks
+                                .map(t => t.attributes?.playParams?.catalogId)
+                                .filter(Boolean);
+                            if (catalogIds.length > 0) {{
+                                await mk.setQueue({{songs: catalogIds}});
+                                await mk.play();
+                                return {{success: true}};
                             }}
                         }} catch(e) {{}}
+
+                        return {{success: false, error: 'Could not play this playlist'}};
                     }}
-                    
+
                     if (mediaType.includes('album') || mediaId.startsWith('l.')) {{
-                        // Fetch catalog equivalent for library album
+                        // Library album id works directly in setQueue.
+                        try {{
+                            await mk.setQueue({{album: mediaId}});
+                            await mk.play();
+                            return {{success: true}};
+                        }} catch(e) {{}}
+
+                        // Fallback: resolve the library album to its catalog twin.
                         try {{
                             const res = await mk.api.music('/v1/me/library/albums/' + mediaId + '/catalog');
                             const catalogId = res?.data?.data?.[0]?.id;
@@ -796,6 +813,8 @@ class ChromeController:
                                 return {{success: true}};
                             }}
                         }} catch(e) {{}}
+
+                        return {{success: false, error: 'Could not play this album'}};
                     }}
                     
                     if (mediaType.includes('station') || mediaId.startsWith('ra.')) {{

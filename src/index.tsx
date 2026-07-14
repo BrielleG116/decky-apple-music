@@ -35,6 +35,9 @@ const amSignOut = callable<[], { success: boolean }>("am_signout");
 type LoginStep = "signedin" | "2fa" | "error";
 const amLogin = callable<[{ email: string; password: string }], { step: LoginStep; error?: string; codeInputCount?: number }>("am_login");
 const amSubmit2fa = callable<[{ code: string }], { step: LoginStep; error?: string }>("am_submit_2fa");
+const applyQrToken = callable<[string], { success: boolean; error?: string }>("apply_qr_token");
+const qrCaptureBegin = callable<[], { success: boolean }>("qr_capture_begin");
+const qrCaptureStatus = callable<[], { state: string }>("qr_capture_status");
 
 // Route MusicKit API calls through the player, which holds Apple's harvested
 // developer token and rewrites the Origin so Apple accepts it. This lets the
@@ -1024,6 +1027,37 @@ const SignInForm = ({ onSuccess }: { onSuccess: () => void }) => {
     setBusy(false);
   };
 
+  // QR / passkey sign-in: runs entirely in Steam's CEF (where the QR renders).
+  // Calling authorize() opens Apple's own sign-in window; the user completes it
+  // there (types their email with the on-screen keyboard, scans the QR with
+  // their phone) — no password/2FA ever passes through the plugin. It resolves
+  // with the music-user-token, which we hand to the Electron player for DRM.
+  const qrSignIn = async () => {
+    if (busy) return;
+    setBusy(true); setError("");
+    try {
+      const mk = (window as any).GlobalMusicKit || ((window as any).MusicKit && (window as any).MusicKit.getInstance());
+      if (!mk) { setError("Player not ready yet — try again in a moment."); setBusy(false); return; }
+      try { await mk.unauthorize(); } catch {}
+      // The QAM panel closes when Apple's sign-in window opens, so the backend
+      // watches Steam's CEF and captures the token itself — this survives the
+      // panel unmounting.
+      try { await qrCaptureBegin(); } catch {}
+      // Fire authorize() (opens Apple's window). If the panel stays open, its
+      // resolution also applies the token directly.
+      mk.authorize().then((tok: string) => {
+        if (tok && String(tok).length > 20) { applyQrToken(String(tok)).catch(()=>{}); }
+      }).catch(()=>{});
+      // Wait for the backend to confirm capture (also completes on QAM reopen).
+      for (let i = 0; i < 100; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try { const st = await qrCaptureStatus(); if (st?.state === "done") { onSuccess(); return; } } catch {}
+      }
+      setError("Didn't detect completion. If you finished on your phone, reopen the plugin.");
+    } catch (e: any) { setError(e?.message || "Phone sign-in failed or was cancelled."); }
+    setBusy(false);
+  };
+
   const RedButton = ({ label, onActivate }: { label: string, onActivate: () => void }) => (
     <FocusHighlight onActivate={busy ? () => {} : onActivate}
       style={{display:"flex",justifyContent:"center",background: busy ? "#7a2733" : "#fa2d48",borderRadius:8,padding:"9px 0",width:"100%",cursor: busy ? "default" : "pointer",marginBottom:6}}>
@@ -1040,6 +1074,12 @@ const SignInForm = ({ onSuccess }: { onSuccess: () => void }) => {
           <div style={{fontSize:12,color:"#ffffff99",marginBottom:4}}>Password</div>
           <TextField value={password} bIsPassword={true} onChange={(e:any)=>setPassword(asStr(e))} style={fieldStyle} />
           <RedButton label="Sign In" onActivate={submitCreds} />
+          <div style={{fontSize:10,color:"#ffffff55",textAlign:"center",margin:"0 0 6px"}}>— or —</div>
+          <FocusHighlight onActivate={busy ? ()=>{} : qrSignIn}
+            style={{display:"flex",justifyContent:"center",background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:8,padding:"9px 0",width:"100%",cursor:busy?"default":"pointer"}}>
+            <span style={{fontSize:12,fontWeight:600,color:"#fff"}}>{busy ? "Working…" : "Sign in with your phone (QR)"}</span>
+          </FocusHighlight>
+          <div style={{fontSize:10,color:"#ffffff55",marginTop:4,lineHeight:1.3}}>Opens Apple's sign-in — scan the QR with your iPhone. Password &amp; 2FA never touch the plugin.</div>
         </>
       ) : (
         <>

@@ -1397,6 +1397,132 @@ class Plugin:
             decky.logger.warning(f"[DeckyAM] _finish_login persist failed: {e}")
         return {"step": "signedin"}
 
+    async def apply_qr_token(self, *args):
+        """Apply a music-user-token captured by the QR/passkey sign-in (which
+        runs in Steam's CEF, where the QR renders) to the Electron player so it
+        can do DRM playback. Persists to settings + the harvest cache too."""
+        try:
+            token = args[0] if args else ""
+            if isinstance(token, list):
+                token = token[0] if token else ""
+            token = str(token or "")
+            if len(token) < 50:
+                return {"success": False, "error": "invalid token"}
+            # Persist to settings.
+            data = self._read_settings()
+            data["musicUserToken"] = token
+            with open(self.settingsFilePath, "w") as f:
+                json.dump(data, f)
+            # Persist to the harvest cache so it survives a player restart.
+            try:
+                cache_path = os.path.join(self.chrome.home, ".config/deckyam-player/harvested-tokens.json")
+                cache = {}
+                if os.path.exists(cache_path):
+                    with open(cache_path) as f:
+                        cache = json.load(f)
+                cache["mut"] = token
+                with open(cache_path, "w") as f:
+                    json.dump(cache, f)
+            except Exception:
+                pass
+            # Apply live to the player's playback page.
+            try:
+                await self.chrome._ensure_cdp_connection()
+                await self.chrome._cdp_eval(
+                    "(() => { try { MusicKit.getInstance().musicUserToken = "
+                    + json.dumps(token) + "; return true; } catch (e) { return false; } })()"
+                )
+            except Exception as e:
+                decky.logger.warning(f"[DeckyAM] apply_qr_token live-apply failed: {e}")
+            return {"success": True}
+        except Exception as e:
+            decky.logger.error(f"[DeckyAM] apply_qr_token error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _cef_eval(self, url_filter, expr, timeout=12):
+        """Evaluate JS in Steam's CEF (remote-debug port 8080, enabled by Decky)
+        on the first page target whose URL matches url_filter. Used to read the
+        QR sign-in token from the authorize.music.apple.com window — the QAM
+        closes during the passkey flow, so the frontend can't capture it."""
+        import socket, base64, struct, time as _t, urllib.request
+        from urllib.parse import urlparse
+        try:
+            ts = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/json", timeout=4).read())
+        except Exception:
+            return None
+        t = next((x for x in ts if x.get("type") == "page" and url_filter in (x.get("url") or "")), None)
+        if not t or not t.get("webSocketDebuggerUrl"):
+            return None
+        u = urlparse(t["webSocketDebuggerUrl"])
+        try:
+            s = socket.create_connection((u.hostname, u.port), timeout=timeout)
+        except Exception:
+            return None
+        try:
+            k = base64.b64encode(os.urandom(16)).decode()
+            s.send(("GET %s HTTP/1.1\r\nHost: %s:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (u.path, u.hostname, u.port, k)).encode())
+            r = b""
+            while b"\r\n\r\n" not in r:
+                r += s.recv(4096)
+
+            def snd(txt):
+                b = txt.encode(); h = bytearray([0x81]); l = len(b); m = os.urandom(4)
+                if l < 126: h.append(0x80 | l)
+                elif l < 65536: h.append(0x80 | 126); h += struct.pack(">H", l)
+                else: h.append(0x80 | 127); h += struct.pack(">Q", l)
+                h += m; s.send(bytes(h) + bytes(bb ^ m[i % 4] for i, bb in enumerate(b)))
+
+            def rcv():
+                d = b""
+                while True:
+                    hh = b""
+                    while len(hh) < 2: hh += s.recv(2 - len(hh))
+                    fin = hh[0] & 0x80; ln = hh[1] & 0x7f
+                    if ln == 126: ln = struct.unpack(">H", s.recv(2))[0]
+                    elif ln == 127: ln = struct.unpack(">Q", s.recv(8))[0]
+                    p = b""
+                    while len(p) < ln: p += s.recv(ln - len(p))
+                    d += p
+                    if fin: break
+                return d
+            snd(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                            "params": {"expression": expr, "returnByValue": True, "awaitPromise": True}}))
+            dl = _t.time() + timeout
+            while _t.time() < dl:
+                try: j = json.loads(rcv())
+                except Exception: continue
+                if j.get("id") == 1:
+                    return j.get("result", {}).get("result", {}).get("value")
+        except Exception:
+            return None
+        finally:
+            try: s.close()
+            except Exception: pass
+        return None
+
+    async def qr_capture_begin(self):
+        """Begin watching Steam's CEF for a QR/passkey sign-in token."""
+        self._qr_state = {"state": "waiting"}
+        asyncio.create_task(self._do_qr_capture())
+        return {"success": True}
+
+    async def qr_capture_status(self):
+        return getattr(self, "_qr_state", {"state": "idle"})
+
+    async def _do_qr_capture(self):
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 150
+        expr = ("(() => { try { return new URL(location.href).searchParams.get('musicUserToken') || ''; }"
+                " catch (e) { return ''; } })()")
+        while loop.time() < deadline:
+            tok = await asyncio.to_thread(self._cef_eval, "authorize.music.apple.com", expr)
+            if tok and isinstance(tok, str) and len(tok) > 50:
+                await self.apply_qr_token(tok)
+                self._qr_state = {"state": "done"}
+                return
+            await asyncio.sleep(1.5)
+        self._qr_state = {"state": "timeout"}
+
     async def mpris_play(self):
         return {"success": await self.chrome.cdp_play()}
 

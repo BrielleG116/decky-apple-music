@@ -24,10 +24,13 @@ const saveSettings = callable<[{ developerToken: string; storefront: string; mus
 const setShuffleBackend = callable<[boolean], { success: boolean }>("set_shuffle");
 const setRepeatBackend = callable<[number], { success: boolean }>("set_repeat");
 const setDuck = callable<[{ enabled?: boolean; depth?: number; release?: number; attack?: number; sensitivity?: number; speechOnly?: boolean; mutedStreams?: string[] }], { success: boolean; enabled?: boolean }>("set_duck");
-const listDuckStreams = callable<[], { streams: { key: string; name: string }[]; muted: string[] }>("list_duck_streams");
+const listDuckStreams = callable<[], { streams: { key: string; name: string; app?: string; media?: string; channels?: number; layout?: string }[]; muted: string[] }>("list_duck_streams");
 const setAutoplay = callable<[boolean], { success: boolean; enabled?: boolean }>("set_autoplay");
 const setMusicTrim = callable<[{ db: number; volume?: number }], { success: boolean; db?: number }>("set_music_trim");
 const playerInstalled = callable<[], { installed: boolean; version: string; latest: string }>("player_installed");
+// Player sign-in + live MusicKit readiness (musicKitReady is false when the
+// player booted offline and MusicKit never loaded from Apple's CDN).
+const amStatus = callable<[], { signedIn: boolean; hasDevToken: boolean; musicKitReady?: boolean; musicKitError?: string | null }>("am_status");
 const installPlayer = callable<[], { success: boolean; already?: boolean }>("install_player");
 const installStatus = callable<[], { state: "idle" | "downloading" | "extracting" | "done" | "error"; pct: number; message: string }>("install_status");
 const amApiCall = callable<[{ path: string; params?: any; options?: any }], { ok: boolean; data?: any; error?: string; status?: number }>("am_api");
@@ -597,16 +600,29 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
       const sf = mk.storefrontId || "us";
       const playlist = isPlaylistItem(album);
       const catalog = playlist ? String(album.id).startsWith("pl.") : isCatalogId(album.id);
-      if (catalog) {
-        const res = await mk.api.music(`/v1/catalog/${sf}/${playlist ? "playlists" : "albums"}/${album.id}`);
-        const d = res?.data?.data?.[0];
-        if (d) {
-          setSelectedAlbum({ ...album, type: d.type, attributes: d.attributes });
-          setAlbumTracks(d.relationships?.tracks?.data ?? []);
+      const kind = playlist ? "playlists" : "albums";
+      // Track relationships come back 100 at a time; page through them all so
+      // playlists/albums with more than 100 songs show their full track list.
+      const fetchAllTracks = async (path: string, cap = 2000): Promise<any[]> => {
+        const all: any[] = [];
+        let offset = 0;
+        while (all.length < cap) {
+          const r = await mk.api.music(path, { limit: 100, offset });
+          const d = r?.data?.data ?? [];
+          all.push(...d);
+          if (!r?.data?.next || d.length < 100) break;
+          offset += 100;
         }
+        return all;
+      };
+      if (catalog) {
+        // One call for the header attributes (name/art), then page the tracks.
+        const res = await mk.api.music(`/v1/catalog/${sf}/${kind}/${album.id}`);
+        const d = res?.data?.data?.[0];
+        if (d) setSelectedAlbum({ ...album, type: d.type, attributes: d.attributes });
+        setAlbumTracks(await fetchAllTracks(`/v1/catalog/${sf}/${kind}/${album.id}/tracks`));
       } else {
-        const res = await mk.api.music(`/v1/me/library/${playlist ? "playlists" : "albums"}/${album.id}/tracks`, { limit: 100 });
-        setAlbumTracks(res?.data?.data ?? []);
+        setAlbumTracks(await fetchAllTracks(`/v1/me/library/${kind}/${album.id}/tracks`));
       }
     } catch(e) { console.error("[DeckyAM] Detail view error:", e); }
     setLoading(false);
@@ -1259,6 +1275,9 @@ const Content = () => {
   const [duckStreams, setDuckStreams] = useState<{ key: string; name: string }[]>([]);
   const [loved, setLoved] = useState(false);
   const [inLib, setInLib] = useState(false);
+  // True when signed in but the player's MusicKit hasn't loaded (e.g. it booted
+  // offline). Library/api proxy is dead until this clears; show a banner.
+  const [reconnecting, setReconnecting] = useState(false);
   const [actionBusy, setActionBusy] = useState<"love"|"add"|null>(null);
   const lastToastKey = useRef("");
   const volumeHoldRef = useRef(0);
@@ -1487,6 +1506,25 @@ const Content = () => {
     return () => clearInterval(pollRef.current);
   }, [status]);
 
+  // Watch the player's live MusicKit readiness. If it booted offline the cached
+  // token still says "signed in" but MusicKit never loaded, so browsing/library
+  // silently fails. Poll /status and surface a "reconnecting" banner; the player
+  // self-heals (retry + on-network-return), so this clears on its own.
+  useEffect(() => {
+    if (status !== "ready") { setReconnecting(false); return; }
+    let stop = false;
+    const check = async () => {
+      try {
+        const st = await amStatus();
+        if (stop) return;
+        setReconnecting(!!st?.signedIn && st?.musicKitReady === false);
+      } catch { /* leave prior state */ }
+    };
+    check();
+    const iv = setInterval(check, 5000);
+    return () => { stop = true; clearInterval(iv); };
+  }, [status]);
+
   // iOS-style lock-screen banner: toast when the track changes (if enabled).
   // NOTE: must stay above the early returns below — hooks can't be conditional.
   useEffect(() => {
@@ -1664,15 +1702,25 @@ const Content = () => {
               {duckStreams.length === 0 ? (
                 <div style={{fontSize:10,color:"#ffffff55",lineHeight:1.4}}>Play a game — its audio streams will appear here so you can toggle which ones trigger ducking.</div>
               ) : (
-                duckStreams.map((st)=>{
+                duckStreams.map((st: any)=>{
                   const on = !duckMutedStreams.includes(st.key);
+                  // Lead with the distinguishing detail (speaker layout + the
+                  // stream's own name) so it's never truncated away; the long
+                  // game/app name goes on the dim second line where it can clip.
+                  const primary = [st.layout, st.media].filter(Boolean).join(" · ");
+                  const app = st.app || st.name || "";
                   return (
                     <FocusHighlight key={st.key} onActivate={async ()=>{
                       const next = on ? [...duckMutedStreams, st.key] : duckMutedStreams.filter(k=>k!==st.key);
                       setDuckMutedStreams(next);
                       try { await setDuck({ enabled:true, mutedStreams: next }); } catch {}
-                    }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"4px 0"}}>
-                      <div style={{fontSize:11,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"75%"}}>{st.name}</div>
+                    }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"5px 0"}}>
+                      <div style={{minWidth:0,flex:1,marginRight:8}}>
+                        <div style={{fontSize:11,color:"#fff",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{primary || app}</div>
+                        {primary ? (
+                          <div style={{fontSize:9,color:"#ffffff66",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{app}</div>
+                        ) : null}
+                      </div>
                       <div style={{width:32,height:18,borderRadius:9,background:on?"#fa2d48":"rgba(255,255,255,0.15)",position:"relative",flexShrink:0}}>
                         <div style={{width:14,height:14,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:on?16:2,transition:"left 0.2s"}} />
                       </div>
@@ -1840,6 +1888,12 @@ const Content = () => {
           </FocusHighlight>
         ))}
       </Focusable>
+
+      {reconnecting && (
+        <div style={{margin:"0 16px 10px",padding:"8px 10px",borderRadius:8,background:"rgba(250,45,72,0.15)",border:"1px solid rgba(250,45,72,0.4)",color:"#ffd0d6",fontSize:11,lineHeight:1.4,textAlign:"center"}}>
+          Reconnecting to Apple Music… check your internet connection. Browsing will resume automatically.
+        </div>
+      )}
 
       <div style={{padding: "0 16px"}}>
         {tab==="player" && (

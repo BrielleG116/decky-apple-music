@@ -12,9 +12,9 @@
   <h3>DeckyAM Player</h3>
   <div id="status">booting…</div>
   <script>
-    // Boot state is exposed on window so the plugin backend can poll it via CDP:
-    //   window.__DECKYAM__ = { ready, error, drm }
-    window.__DECKYAM__ = { ready: false, error: null, drm: null };
+    // Boot state is exposed on window so the plugin backend can poll it via CDP
+    // and via /status:  window.__DECKYAM__ = { ready, error, drm, attempts }
+    window.__DECKYAM__ = { ready: false, error: null, drm: null, attempts: 0 };
     const statusEl = document.getElementById("status");
     function setStatus(msg) {
       statusEl.textContent = msg;
@@ -35,16 +35,23 @@
       }
     }
 
+    // Track the injected <script> so a retry doesn't stack duplicates.
+    let mkScriptEl = null;
     function loadMusicKit() {
       return new Promise((resolve, reject) => {
         if (window.MusicKit) return resolve();
         document.addEventListener("musickitloaded", () => resolve(), { once: true });
+        // Drop a previous failed script tag before adding a fresh one.
+        if (mkScriptEl && mkScriptEl.parentNode) mkScriptEl.parentNode.removeChild(mkScriptEl);
         const s = document.createElement("script");
-        s.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
+        // Cache-bust so a retry after a failed load isn't served the browser's
+        // cached error/partial response.
+        s.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js?_r=" + Date.now();
         s.async = true;
         s.onerror = () => reject(new Error("failed to load musickit.js"));
+        mkScriptEl = s;
         document.head.appendChild(s);
-        setTimeout(() => reject(new Error("musickit.js load timeout")), 30000);
+        setTimeout(() => { if (!window.MusicKit) reject(new Error("musickit.js load timeout")); }, 30000);
       });
     }
 
@@ -60,11 +67,17 @@
       await loadMusicKit();
 
       setStatus("configuring MusicKit…");
-      await MusicKit.configure({
-        developerToken: cfg.developerToken,
-        app: { name: "DeckyAM", build: "1.0.0" },
-      });
-      const mk = MusicKit.getInstance();
+      // Idempotent across retries: only configure if there's no instance yet
+      // (re-configuring an already-configured MusicKit throws).
+      let mk = null;
+      try { mk = MusicKit.getInstance(); } catch (_) { mk = null; }
+      if (!mk) {
+        await MusicKit.configure({
+          developerToken: cfg.developerToken,
+          app: { name: "DeckyAM", build: "1.0.0" },
+        });
+        mk = MusicKit.getInstance();
+      }
       if (cfg.musicUserToken) {
         try { mk.musicUserToken = cfg.musicUserToken; } catch (e) {
           console.log("[boot] could not set musicUserToken: " + e);
@@ -90,10 +103,36 @@
       );
     }
 
-    boot().catch((e) => {
-      window.__DECKYAM__.error = String(e);
-      setStatus("BOOT ERROR: " + e);
+    // Retry driver: an offline boot (no network yet, or resuming from sleep
+    // before Wi-Fi reconnects) fails to fetch musickit.js from Apple's CDN,
+    // which would otherwise leave the player permanently broken while still
+    // reporting "signed in". Retry with backoff, and re-attempt immediately
+    // when the OS reports the network is back.
+    let booting = false;
+    let retryTimer = null;
+    async function attemptBoot() {
+      if (booting || window.__DECKYAM__.ready) return;
+      booting = true;
+      window.__DECKYAM__.attempts++;
+      try {
+        await boot();
+        window.__DECKYAM__.error = null;
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      } catch (e) {
+        window.__DECKYAM__.error = String(e);
+        const delay = Math.min(3000 * window.__DECKYAM__.attempts, 30000);
+        setStatus("BOOT ERROR: " + e + "\nretrying in " + Math.round(delay / 1000) + "s (attempt " + window.__DECKYAM__.attempts + ")…");
+        if (retryTimer) clearTimeout(retryTimer);
+        retryTimer = setTimeout(attemptBoot, delay);
+      } finally {
+        booting = false;
+      }
+    }
+    // When the network comes back, don't wait out the backoff — retry now.
+    window.addEventListener("online", () => {
+      if (!window.__DECKYAM__.ready) { if (retryTimer) clearTimeout(retryTimer); attemptBoot(); }
     });
+    attemptBoot();
   </script>
 </body>
 </html>

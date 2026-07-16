@@ -757,10 +757,44 @@ class ChromeController:
                     }}
                     
                     if (mediaType.includes('playlist') || mediaId.startsWith('p.') || mediaId.startsWith('pl.')) {{
-                        // A library/catalog playlist id works directly in setQueue.
-                        // This is the reliable path for custom, smart, and
-                        // catalog-backed playlists (their tracks often have no
-                        // per-track catalogId, so queuing songs individually fails).
+                        // MusicKit's setQueue({{playlist}}) silently caps the queue at
+                        // 100 tracks, so first gather the FULL track list (paged) and
+                        // queue every song ourselves. Library playlists expose the
+                        // catalog id under playParams.catalogId; catalog playlists'
+                        // track id IS the catalog id.
+                        const sf = mk.storefrontId || 'us';
+                        const isLib = mediaId.startsWith('p.');
+                        const tracksPath = isLib
+                            ? '/v1/me/library/playlists/' + mediaId + '/tracks'
+                            : '/v1/catalog/' + sf + '/playlists/' + mediaId + '/tracks';
+                        let ids = [], total = 0, missing = 0, off = 0;
+                        try {{
+                            while (off < 5000) {{
+                                const r = await mk.api.music(tracksPath, {{ limit: 100, offset: off }});
+                                const d = (r && r.data && r.data.data) || [];
+                                for (const t of d) {{
+                                    total++;
+                                    const pp = t.attributes && t.attributes.playParams;
+                                    const cid = (pp && pp.catalogId) || (t.type === 'songs' ? t.id : null);
+                                    if (cid) ids.push(String(cid)); else missing++;
+                                }}
+                                if (!r || !r.data || !r.data.next || d.length < 100) break;
+                                off += 100;
+                            }}
+                        }} catch(e) {{}}
+
+                        // Queue all tracks by id when the playlist is long (the
+                        // descriptor would truncate it) or we resolved every track.
+                        if (ids.length > 0 && (total > 100 || missing === 0)) {{
+                            try {{
+                                await mk.setQueue({{songs: ids}});
+                                await mk.play();
+                                return {{success: true, queued: ids.length, total: total}};
+                            }} catch(e) {{}}
+                        }}
+
+                        // <=100 tracks, or some library-only songs lack a catalog id:
+                        // the playlist descriptor is the most reliable path.
                         try {{
                             await mk.setQueue({{playlist: mediaId}});
                             await mk.play();
@@ -773,20 +807,6 @@ class ChromeController:
                             const catalogId = res?.data?.data?.[0]?.id;
                             if (catalogId) {{
                                 await mk.setQueue({{playlist: catalogId}});
-                                await mk.play();
-                                return {{success: true}};
-                            }}
-                        }} catch(e) {{}}
-
-                        // Fallback: queue the playlist's tracks by catalog id.
-                        try {{
-                            const res = await mk.api.music('/v1/me/library/playlists/' + mediaId + '/tracks', {{ limit: 100 }});
-                            const tracks = res?.data?.data ?? [];
-                            const catalogIds = tracks
-                                .map(t => t.attributes?.playParams?.catalogId)
-                                .filter(Boolean);
-                            if (catalogIds.length > 0) {{
-                                await mk.setQueue({{songs: catalogIds}});
                                 await mk.play();
                                 return {{success: true}};
                             }}
@@ -1200,7 +1220,16 @@ class Plugin:
                             json.dump(data, f)
             except Exception as e:
                 decky.logger.warning(f"[DeckyAM] am_status token persist failed: {e}")
-        return {"signedIn": signed_in, "hasDevToken": bool(r.get("hasDevToken"))}
+        return {
+            "signedIn": signed_in,
+            "hasDevToken": bool(r.get("hasDevToken")),
+            # When the player booted offline, the cached token still reports
+            # signed-in but MusicKit never loaded, so the library/api proxy is
+            # dead. Surface that so the UI can show "reconnecting" instead of a
+            # broken, empty library.
+            "musicKitReady": bool(r.get("musicKitReady")),
+            "musicKitError": r.get("musicKitError"),
+        }
 
     @staticmethod
     def _clean_err(text):

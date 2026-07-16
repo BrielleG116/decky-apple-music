@@ -12,12 +12,13 @@ A [Decky Loader](https://decky.xyz) plugin that plays **full-length Apple Music*
 |---|---|
 | ▶️ Full-length DRM playback (not 30s previews) | Widevine via a bundled castlabs Electron engine |
 | 🎧 Background playback | Keeps playing when the QAM closes and games launch |
-| 🔐 In-plugin Apple ID sign-in | Email / password / 2FA typed right in the QAM |
+| 🔐 In-plugin Apple ID sign-in | Password **or QR / phone sign-in** — scan with your iPhone, credentials never touch the plugin |
 | 🔎 Search, library, For You, artist radio | Browse and queue anything |
+| 📃 Full playlists & albums | Plays and lists every track, even for playlists with **100+ songs** |
 | ❤️ Favorite + Add to Library | |
 | 🔀 Shuffle / repeat / seek / volume | Native-feeling transport controls |
 | 🎚️ Music level trim | Balance music against game loudness (default −8 dB) |
-| 🎮 Auto-duck for games | Lowers music when game audio gets loud |
+| 🎮 Auto-duck for games | Lowers music when game audio gets loud — per-stream toggles, sensitivity, dialogue-only mode |
 | ⏭️ Autoplay similar songs | Optional; off by default |
 
 ---
@@ -31,7 +32,7 @@ A [Decky Loader](https://decky.xyz) plugin that plays **full-length Apple Music*
    https://github.com/BrielleG116/decky-apple-music/releases/latest/download/apple-music-plugin.zip
    ```
 4. Open **Apple Music** in the QAM. On first run it shows **Player setup → Install Player** — tap it (a one-time ~120 MB download of the playback engine).
-5. **Sign in** with your Apple ID (you'll get a 2FA prompt on your trusted device).
+5. **Sign in** with your Apple ID — either type your password (2FA prompt arrives on your trusted device), or tap **Sign in with your phone (QR)** and scan the code with your iPhone so your credentials never go through the plugin.
 6. Start listening 🎶
 
 The plugin itself is tiny; the large playback engine is downloaded on first run rather than bundled.

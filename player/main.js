@@ -444,11 +444,28 @@ function startPageServer() {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } else if (req.url === "/status") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        signedIn: !!currentConfig.musicUserToken,
-        hasDevToken: !!currentConfig.developerToken,
-      }));
+      // Report the live boot state of the MusicKit page too, not just the
+      // cached token — an offline boot can leave us "signed in" (cached token)
+      // while MusicKit never loaded, so the library/api proxy is dead.
+      (async () => {
+        let mkReady = false, mkError = null, attempts = 0;
+        try {
+          if (win && !win.isDestroyed()) {
+            const s = await win.webContents
+              .executeJavaScript("(window.__DECKYAM__ || {})")
+              .catch(() => null);
+            if (s) { mkReady = !!s.ready; mkError = s.error || null; attempts = s.attempts || 0; }
+          }
+        } catch (_) {}
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          signedIn: !!currentConfig.musicUserToken,
+          hasDevToken: !!currentConfig.developerToken,
+          musicKitReady: mkReady,
+          musicKitError: mkError,
+          bootAttempts: attempts,
+        }));
+      })();
     } else if (req.url === "/health") {
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("ok");

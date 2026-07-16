@@ -30,6 +30,7 @@ import sys
 import time
 import json
 import math
+import re
 import select
 import array
 import subprocess
@@ -98,8 +99,14 @@ def find_player_node():
     return None
 
 
+def layout_label(channels):
+    """Human-friendly speaker layout from a channel count."""
+    return {1: "Mono", 2: "Stereo", 4: "Quad", 6: "5.1 surround",
+            8: "7.1 surround"}.get(channels, f"{channels}ch" if channels else "")
+
+
 def find_game_sink_inputs():
-    """Return [(index, app, media)] for non-player game streams."""
+    """Return [(index, app, media, channels)] for non-player game streams."""
     try:
         out = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=4).stdout
     except Exception as e:
@@ -109,10 +116,11 @@ def find_game_sink_inputs():
     idx = None
     app = None
     media = None
+    channels = 0
 
     def flush():
         if idx is not None and app not in EXCLUDE_APP_NAMES and media not in EXCLUDE_MEDIA_NAMES:
-            result.append((idx, app, media))
+            result.append((idx, app, media, channels))
 
     for line in out.splitlines():
         s = line.strip()
@@ -124,10 +132,16 @@ def find_game_sink_inputs():
                 idx = None
             app = None
             media = None
+            channels = 0
         elif s.startswith("application.name = "):
             app = s.split("= ", 1)[1].strip().strip('"')
         elif s.startswith("media.name = "):
             media = s.split("= ", 1)[1].strip().strip('"')
+        elif s.startswith("Sample Specification:"):
+            # e.g. "Sample Specification: float32le 8ch 48000Hz"
+            m = re.search(r"(\d+)ch", s)
+            if m:
+                channels = int(m.group(1))
     flush()
     return result
 
@@ -136,9 +150,16 @@ def write_streams(detected):
     """Publish detected streams (deduped) for the UI to list + toggle."""
     try:
         seen = {}
-        for (_i, a, m) in detected:
+        for (_i, a, m, c) in detected:
             k = stream_key(a, m)
-            seen[k] = {"key": k, "name": stream_name(a, m)}
+            seen[k] = {
+                "key": k,
+                "name": stream_name(a, m),   # legacy single-line label
+                "app": a or "Unknown app",
+                "media": m or "",
+                "channels": c or 0,
+                "layout": layout_label(c),
+            }
         tmp = STREAMS_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"ts": time.time(), "streams": list(seen.values())}, f)
@@ -273,7 +294,7 @@ def main():
             detected = find_game_sink_inputs()
             write_streams(detected)  # publish ALL detected streams for the UI
             # Only capture streams the user hasn't muted.
-            wanted = {i: (a, m) for (i, a, m) in detected
+            wanted = {i: (a, m) for (i, a, m, _c) in detected
                       if stream_key(a, m) not in muted}
             for i in list(procs):
                 if i not in wanted or procs[i].poll() is not None:

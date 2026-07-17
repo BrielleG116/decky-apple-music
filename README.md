@@ -20,6 +20,7 @@ A [Decky Loader](https://decky.xyz) plugin that plays **full-length Apple Music*
 | 🎚️ Music level trim | Balance music against game loudness (default −8 dB) |
 | 🎮 Auto-duck for games | Lowers music when game audio gets loud — per-stream toggles, sensitivity, dialogue-only mode |
 | ⏭️ Autoplay similar songs | Optional; off by default |
+| 🔁 Offline-boot recovery | If the engine starts with no internet, it auto-reconnects when the network returns instead of getting stuck |
 
 ---
 
@@ -84,6 +85,7 @@ Maintainer distribution steps (creating releases, updating the player) are in **
 ## Troubleshooting
 
 - **Stuck on "Install Player" / download fails** — make sure the Deck is online; the engine downloads from GitHub Releases.
+- **Signed in but library/browse is empty** — the engine likely started before the network was up. It reconnects automatically once you're online (a "Reconnecting…" banner shows); reopen the QAM after a few seconds.
 - **Sign-in says "Check the account information"** — wrong Apple ID or password; try again.
 - **Only previews / no full playback** — an active Apple Music subscription is required.
 - **Music much louder than the game** — that's normal loudness mastering; use the **Music level** slider in Settings (or the volume slider).

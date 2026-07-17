@@ -17,18 +17,19 @@ Create a repo, e.g. `github.com/jeffmartinez/decky-apple-music`.
 
 ### 2. Create the release + upload the player
 - Cut a release tagged **`v1.0.0`**.
-- Upload the player tarball as a release asset:
-  `release/deckyam-player-1.0.0.tar.gz`
-  (already built; sha256 `205ab5cd…ecfd90`).
+- Upload the player tarball as a release asset (the release tag stays `v1.0.0`;
+  new player builds are added as versioned assets alongside it):
+  `release/deckyam-player-1.0.1.tar.gz`
+  (current; sha256 `005fa978…1ffe45`).
 - Copy the asset's **download URL**. It looks like:
-  `https://github.com/<OWNER>/<REPO>/releases/download/v1.0.0/deckyam-player-1.0.0.tar.gz`
+  `https://github.com/<OWNER>/<REPO>/releases/download/v1.0.0/deckyam-player-1.0.1.tar.gz`
 
 ### 3. Point the plugin at the player
 Edit `main.py` and set:
 ```python
-PLAYER_DOWNLOAD_URL = "https://github.com/<OWNER>/<REPO>/releases/download/v1.0.0/deckyam-player-1.0.0.tar.gz"
+PLAYER_DOWNLOAD_URL = "https://github.com/<OWNER>/<REPO>/releases/download/v1.0.0/deckyam-player-1.0.1.tar.gz"
 ```
-(`PLAYER_VERSION` and `PLAYER_SHA256` are already correct for this tarball.)
+(Also set `PLAYER_VERSION` and `PLAYER_SHA256` to match the tarball you uploaded.)
 
 ### 4. Build the plugin zip
 ```bash

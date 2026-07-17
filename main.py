@@ -13,10 +13,10 @@ DEFAULT_STOREFRONT = "us"
 
 # --- Electron player download (installed on first run; too big to ship in the
 # plugin zip). Host the tarball as a GitHub Release asset and set the URL below.
-PLAYER_VERSION = "1.0.0"
-PLAYER_DOWNLOAD_URL = "https://github.com/BrielleG116/decky-apple-music/releases/download/v1.0.0/deckyam-player-1.0.0.tar.gz"
-# sha256 of deckyam-player-1.0.0.tar.gz (integrity check; set "" to skip).
-PLAYER_SHA256 = "205ab5cd30fcba3db1ca7ec08b5d1bdb3d8aac694339a934d406121dc6ecfd90"
+PLAYER_VERSION = "1.0.1"
+PLAYER_DOWNLOAD_URL = "https://github.com/BrielleG116/decky-apple-music/releases/download/v1.0.0/deckyam-player-1.0.1.tar.gz"
+# sha256 of deckyam-player-1.0.1.tar.gz (integrity check; set "" to skip).
+PLAYER_SHA256 = "005fa978b41d70fac7ff7b015330b9879021d4ee9188e8c143d85bb0221ffe45"
 
 # MPRIS DBUS constants
 MP_PATH = "/org/mpris/MediaPlayer2"

@@ -44,6 +44,18 @@ URL becomes the "Install from ZIP" link you give testers:
 
 ---
 
+## Versioning and release tags
+
+- **A release's tag is always `v<version>` where `<version>` is `package.json`'s `version`.**
+  Update checkers (e.g. DeckyHub) compare the installed plugin version with the latest release
+  tag, so a mismatch hides updates. `./package-plugin.sh` prints the tag to use.
+- **`v1.0.0` is special and permanent**: it only hosts the player tarballs that
+  `PLAYER_DOWNLOAD_URL` in `main.py` points at. Never delete it, and don't use it for plugin zips.
+- To release the plugin: bump `version` in `package.json` → `./package-plugin.sh` → commit →
+  create release `v<version>` (mark it **Latest**) with `apple-music-plugin.zip` attached.
+- Stable install link that always serves the newest zip:
+  `https://github.com/BrielleG116/decky-apple-music/releases/latest/download/apple-music-plugin.zip`
+
 ## Tester instructions
 
 1. Install **Decky Loader** (if not already).

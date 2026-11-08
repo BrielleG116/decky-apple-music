@@ -8,6 +8,11 @@ ROOT="$(pwd)"
 PLUGIN="apple-music-plugin"
 OUT="$ROOT/$PLUGIN.zip"
 
+# The release tag MUST equal package.json's version (v<version>): update checkers such as DeckyHub
+# compare the installed plugin's version with the latest release tag. The permanent `v1.0.0`
+# release only hosts the player tarballs that PLAYER_DOWNLOAD_URL points at.
+VERSION="$(node -p "require('./package.json').version")"
+
 echo "Building frontend…"
 npm run build >/dev/null
 
@@ -30,3 +35,8 @@ rm -rf "$STAGE"
 
 echo "Built: $OUT"
 du -h "$OUT" | awk '{print "Size: "$1}'
+echo "Plugin version: $VERSION"
+echo "Publish as release tag: v$VERSION   (the tag must match the version above)"
+if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null 2>&1; then
+  echo "NOTE: tag v$VERSION already exists — bump \"version\" in package.json for a new release."
+fi

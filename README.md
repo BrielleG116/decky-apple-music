@@ -15,6 +15,8 @@ A [Decky Loader](https://decky.xyz) plugin that plays **full-length Apple Music*
 | 🔐 In-plugin Apple ID sign-in | Password **or QR / phone sign-in** — scan with your iPhone, credentials never touch the plugin |
 | 🔎 Search, library, For You, artist radio | Browse and queue anything |
 | 📃 Full playlists & albums | Plays and lists every track, even for playlists with **100+ songs** |
+| 📚 Whole library | Songs, Albums and Playlists load in full (no 100-item cap), sortable **A–Z / Recently added**, with **Play all** and **Shuffle all** |
+| 🔞 Explicit content | In regions where Apple restricts explicit songs by default, the plugin asks once to allow them (also a toggle in Settings) |
 | ❤️ Favorite + Add to Library | |
 | 🔀 Shuffle / repeat / seek / volume | Native-feeling transport controls |
 | 🎚️ Music level trim | Balance music against game loudness (default −8 dB) |

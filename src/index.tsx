@@ -7,6 +7,7 @@ import {
   TextField,
   showModal,
   ModalRoot,
+  ConfirmModal,
   Focusable,
   SidebarNavigation,
 } from "@decky/ui";
@@ -19,7 +20,7 @@ const getDevTokenCall = callable<[], { token: string }>("get_dev_token");
 async function getDevToken(): Promise<string> {
   try { const r = await getDevTokenCall(); return (r && r.token) || ""; } catch { return ""; }
 }
-const getSettings  = callable<[], { developerToken: string; storefront: string; musicUserToken: string; trackToasts?: boolean; duckEnabled?: boolean; duckDepth?: number; duckRelease?: number; duckAttack?: number }>("get_settings");
+const getSettings  = callable<[], { developerToken: string; storefront: string; musicUserToken: string; trackToasts?: boolean; allowExplicit?: boolean | null; duckEnabled?: boolean; duckDepth?: number; duckRelease?: number; duckAttack?: number }>("get_settings");
 const saveSettings = callable<[{ developerToken: string; storefront: string; musicUserToken: string; trackToasts?: boolean }], void>("save_settings");
 const setShuffleBackend = callable<[boolean], { success: boolean }>("set_shuffle");
 const setRepeatBackend = callable<[number], { success: boolean }>("set_repeat");
@@ -71,6 +72,47 @@ const getQueue = callable<[], { tracks: { id: string; title: string; artist: str
 const playTrackAt = callable<[number], { success: boolean }>("play_track_at");
 const setVolume = callable<[number], { success: boolean; volume: number }>("set_volume");
 const playMedia = callable<{type: string; id: string}, { success: boolean; error?: string }>("play_media");
+const setExplicitAllowed = callable<[boolean], { success: boolean; allowExplicit?: boolean; applied?: boolean; isRestricted?: boolean; error?: string }>("set_explicit_allowed");
+const playIds = callable<[{ ids: string[]; shuffle?: boolean }], { success: boolean; error?: string; requested?: number; queued?: number; skipped?: number; unavailable?: number; restricted?: boolean }>("play_ids");
+
+// ---- Explicit content -------------------------------------------------------------------
+// Apple restricts explicit songs by default in some storefronts (e.g. ru, tr, in, br) until the
+// user opts in; MusicKit then fails with "Content restricted". Like Apple's own clients, ask once
+// and remember the answer (also a toggle in Settings).
+const isRestrictedError = (e?: string) => /restrict/i.test(e || "");
+const askAllowExplicit = (body: string): Promise<boolean> => new Promise((resolve) => {
+  let settled = false;
+  const done = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+  showModal(
+    <ConfirmModal
+      strTitle="Allow explicit content?"
+      strDescription={body}
+      strOKButtonText="Allow"
+      strCancelButtonText="Not now"
+      onOK={() => done(true)}
+      onCancel={() => done(false)}
+      onEscKeypress={() => done(false)}
+    />
+  );
+});
+const EXPLICIT_PROMPT = "Apple restricts explicit songs by default in your region, so this one can't play yet. Allow explicit content in the player? You can change this any time in Settings.";
+async function withExplicitPrompt<T extends { success: boolean; error?: string }>(run: () => Promise<T>): Promise<T> {
+  const r = await run();
+  if (!r.success && isRestrictedError(r.error)) {
+    if (await askAllowExplicit(EXPLICIT_PROMPT)) {
+      try { await setExplicitAllowed(true); } catch {}
+      return await run();
+    }
+    return { ...r, error: "Explicit content is restricted — allow it in Settings to play this." } as T;
+  }
+  return r;
+}
+const playMediaE = (a: { type: string; id: string }) => withExplicitPrompt(() => (playMedia as any)(a) as Promise<{ success: boolean; error?: string }>);
+const playOnBackendE = (a: { track_id: string; type: string; url?: string }) => withExplicitPrompt(() => (playOnBackend as any)(a) as Promise<{ success: boolean; error?: string; url?: string }>);
+
+// Library paging: first page shows immediately, the rest loads in the background.
+const LIB_PAGE = 100;
+const LIB_CAP = 10000;
 
 interface TrackInfo {
   id: string; title: string; artist: string; album: string;
@@ -421,16 +463,16 @@ const RecentlyPlayedPanel = ({ mk, onPlay }: { mk: any; onPlay?: () => void }) =
         const rawUrl = s.attributes?.url;
         const itemUrl = (rawUrl && rawUrl.startsWith("https://")) ? rawUrl : undefined;
         const targetId = s.attributes?.playParams?.catalogId || itemId;
-        const res = await playOnBackend({ track_id: targetId, type: itemType, url: itemUrl });
+        const res = await playOnBackendE({ track_id: targetId, type: itemType, url: itemUrl });
         if (res.success) { played = true; }
         else {
-          const res2 = await playMedia({ type: itemType, id: itemId });
+          const res2 = await playMediaE({ type: itemType, id: itemId });
           if (res2.success) played = true;
           else toaster.toast({ title: "Apple Music", body: "Play Error: " + (res2.error || "Unknown"), duration: 3000 });
         }
       } else {
         const mediaId = s.attributes?.playParams?.catalogId || itemId;
-        const res = await playMedia({ type: itemType, id: mediaId });
+        const res = await playMediaE({ type: itemType, id: mediaId });
         if (res.success) played = true;
         else toaster.toast({ title: "Apple Music", body: "Play Error: " + (res.error || "Unknown"), duration: 3000 });
       }
@@ -519,6 +561,13 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState<any>(null);
   const [searching, setSearching] = useState(false);
+  const [libSort, setLibSort] = useState<string>(() => { try { return window.localStorage.getItem("deckyam.libSort") || "name"; } catch { return "name"; } });
+  const [visibleCount, setVisibleCount] = useState(LIB_PAGE);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const loadToken = useRef(0);          // cancels a stale background load when the category/sort changes
+  const allRef = useRef<any[]>([]);     // the full list of the current category (for Play all)
+  const loadingMoreRef = useRef(false);
 
   const fetchHome = useCallback(async () => {
     if (!mk) return;
@@ -547,15 +596,76 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
     } catch(e) { console.error("[DeckyAM] Recommendations error:", e); }
   }, [mk]);
 
-  const fetchCategory = useCallback(async (cat: string) => {
-    if (!mk) return;
-    setLoading(true);
+  // Loads a library category page by page (the API returns at most 100 per request). The first
+  // page is shown immediately; the rest streams in. Artists don't support `sort`.
+  const fetchCategory = useCallback(async (cat: string, sort: string = "name"): Promise<any[]> => {
+    if (!mk) return [];
+    const token = ++loadToken.current;
+    setLoading(true); setVisibleCount(LIB_PAGE); setData([]);
+    allRef.current = [];
+    loadingMoreRef.current = false; setLoadingMore(false);
+    const all: any[] = [];
     try {
-      const res = await mk.api.music(`/v1/me/library/${cat}`, { limit: 50 });
-      setData(res?.data?.data ?? []);
+      let offset = 0;
+      while (all.length < LIB_CAP) {
+        const params: any = { limit: LIB_PAGE, offset };
+        if (cat !== "artists" && sort !== "name") params.sort = sort;
+        let res: any;
+        try { res = await mk.api.music(`/v1/me/library/${cat}`, params); }
+        catch (e) {
+          if (params.sort) { delete params.sort; res = await mk.api.music(`/v1/me/library/${cat}`, params); }
+          else throw e;
+        }
+        if (token !== loadToken.current) return all;     // a newer load took over
+        const d = res?.data?.data ?? [];
+        all.push(...d);
+        allRef.current = all;
+        setData(all.slice());
+        if (offset === 0) setLoading(false);
+        const more = !!res?.data?.next && d.length >= LIB_PAGE;
+        loadingMoreRef.current = more; setLoadingMore(more);
+        if (!more) break;
+        offset += LIB_PAGE;
+      }
     } catch(e) { console.error(`[DeckyAM] ${cat} load error:`, e); }
-    setLoading(false);
+    if (token === loadToken.current) { loadingMoreRef.current = false; setLoadingMore(false); setLoading(false); }
+    return all;
   }, [mk]);
+
+  // Play / Shuffle the whole library (Songs view). Queues every song by catalog id.
+  const playWholeLibrary = async (shuffle: boolean) => {
+    if (!mk || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const t0 = Date.now();
+      while (loadingMoreRef.current && Date.now() - t0 < 60000) await new Promise((r) => setTimeout(r, 200));
+      const songs = allRef.current;
+      const ids = songs.map((x: any) => x?.attributes?.playParams?.catalogId).filter(Boolean).map(String);
+      if (!ids.length) { toaster.toast({ title: "Apple Music", body: "No playable songs found in your library", duration: 3000 }); return; }
+      const run = () => playIds({ ids, shuffle });
+      let r = await run();
+      const blocked = (x: any) => (!x.success && isRestrictedError(x.error)) || (x.success && x.restricted && (x.skipped ?? 0) > 0);
+      if (blocked(r)) {
+        const skipped = r.success ? ` ${r.skipped} explicit song${r.skipped === 1 ? " was" : "s were"} skipped.` : "";
+        if (await askAllowExplicit(EXPLICIT_PROMPT.replace("so this one can't play yet.", "so some songs can't play." + skipped))) {
+          try { await setExplicitAllowed(true); } catch {}
+          r = await run();
+        }
+      }
+      if (r.success) {
+        const noCatalog = songs.length - ids.length;
+        const notes = [(r.skipped ?? 0) > 0 ? `${r.skipped} explicit skipped` : "", (r.unavailable ?? 0) > 0 ? `${r.unavailable} unavailable` : "", noCatalog > 0 ? `${noCatalog} not streamable` : ""].filter(Boolean).join(", ");
+        toaster.toast({ title: "Apple Music", body: `${shuffle ? "Shuffling" : "Playing"} ${r.queued ?? ids.length} songs${notes ? " (" + notes + ")" : ""}`, duration: 3500 });
+        if (onPlay) setTimeout(() => onPlay(), 500);
+      } else {
+        toaster.toast({ title: "Apple Music", body: "Play Error: " + (r.error || "Unknown"), duration: 3500 });
+      }
+    } catch (e: any) {
+      toaster.toast({ title: "Apple Music", body: "Play Error: " + (e?.message || "Unknown"), duration: 3500 });
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   const fetchArtistAlbums = useCallback(async (artist: any) => {
     if (!mk) return;
@@ -663,7 +773,7 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
       const r2 = await mk.api.music(`/v1/catalog/${sf}/artists/${aid}/station`);
       const station = r2?.data?.data?.[0];
       if (!station) throw new Error("No station available");
-      const res = await playMedia({ type: "stations", id: station.id });
+      const res = await playMediaE({ type: "stations", id: station.id });
       if (!res.success) throw new Error(res.error || "Playback failed");
       if (onPlay) setTimeout(() => onPlay(), 500);
     } catch(e: any) {
@@ -676,7 +786,7 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
   useEffect(() => {
     if (view === "home") fetchHome();
     else if (view === "artist-detail" || view === "album-detail" || view === "search") { /* fetched on demand */ }
-    else fetchCategory(view);
+    else fetchCategory(view, libSort);
   }, [view, fetchHome, fetchCategory]);
 
   // Consume an external navigation request (Go to Album / Go to Artist)
@@ -700,16 +810,16 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
         const rawUrl = s.attributes?.url;
         const itemUrl = (rawUrl && rawUrl.startsWith("https://")) ? rawUrl : undefined;
         const targetId = s.attributes?.playParams?.catalogId || itemId;
-        const res = await playOnBackend({ track_id: targetId, type: itemType, url: itemUrl });
+        const res = await playOnBackendE({ track_id: targetId, type: itemType, url: itemUrl });
         if (res.success) { played = true; }
         else {
-          const res2 = await playMedia({ type: itemType, id: itemId });
+          const res2 = await playMediaE({ type: itemType, id: itemId });
           if (res2.success) played = true;
           else toaster.toast({ title: "Apple Music", body: "Play Error: " + (res2.error || "Unknown"), duration: 3000 });
         }
       } else {
         const mediaId = s.attributes?.playParams?.catalogId || itemId;
-        const res = await playMedia({ type: itemType, id: mediaId });
+        const res = await playMediaE({ type: itemType, id: mediaId });
         if (res.success) played = true;
         else toaster.toast({ title: "Apple Music", body: "Play Error: " + (res.error || "Unknown"), duration: 3000 });
       }
@@ -969,7 +1079,34 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
           Back to Library
         </FocusHighlight>
       </PanelSectionRow>
-      {data.map((s: any) => (
+      {view !== "artists" && (
+        <PanelSectionRow>
+          <div style={{display:"flex", gap:6, width:"100%"}}>
+            {([["name", "A–Z"], ["-dateAdded", "Recently added"]] as [string, string][]).map(([k, label]) => (
+              <FocusHighlight key={k}
+                onActivate={() => { setLibSort(k); try { window.localStorage.setItem("deckyam.libSort", k); } catch {} fetchCategory(view, k); }}
+                style={{flex:1, textAlign:"center", padding:"6px 4px", borderRadius:8, fontSize:12, fontWeight:600, cursor:"pointer", color:"#fff", background: libSort === k ? "#fa2d48" : "rgba(255,255,255,0.08)"}}>
+                {label}
+              </FocusHighlight>
+            ))}
+          </div>
+        </PanelSectionRow>
+      )}
+      {view === "songs" && (
+        <PanelSectionRow>
+          <div style={{display:"flex", gap:6, width:"100%"}}>
+            <FocusHighlight onActivate={() => playWholeLibrary(false)}
+              style={{flex:1, textAlign:"center", padding:"8px 4px", borderRadius:8, fontSize:13, fontWeight:700, cursor:"pointer", color:"#fff", background:"#fa2d48", opacity: bulkBusy ? 0.6 : 1}}>
+              {bulkBusy ? "Loading…" : "Play all"}
+            </FocusHighlight>
+            <FocusHighlight onActivate={() => playWholeLibrary(true)}
+              style={{flex:1, textAlign:"center", padding:"8px 4px", borderRadius:8, fontSize:13, fontWeight:700, cursor:"pointer", color:"#fff", background:"rgba(255,255,255,0.12)", opacity: bulkBusy ? 0.6 : 1}}>
+              Shuffle all
+            </FocusHighlight>
+          </div>
+        </PanelSectionRow>
+      )}
+      {data.slice(0, visibleCount).map((s: any) => (
         <PanelSectionRow key={s.id}>
           <FocusHighlight
             onActivate={() => view === "artists" ? fetchArtistAlbums(s) : view === "albums" ? fetchAlbumDetail(s, "albums") : view === "playlists" ? fetchAlbumDetail(s, "playlists") : playItem(s)}
@@ -990,6 +1127,19 @@ const LibraryPanel = ({ mk, onPlay, nav, onNavConsumed }: { mk: any; onPlay?: ()
           </FocusHighlight>
         </PanelSectionRow>
       ))}
+      {data.length > visibleCount && (
+        <PanelSectionRow>
+          <FocusHighlight onActivate={() => setVisibleCount((c) => c + LIB_PAGE)}
+            style={{width:"100%", textAlign:"center", padding:"8px", borderRadius:8, fontSize:12, fontWeight:600, color:"#fa2d48", cursor:"pointer"}}>
+            Show more ({data.length - visibleCount} more{loadingMore ? ", still loading…" : ""})
+          </FocusHighlight>
+        </PanelSectionRow>
+      )}
+      {loadingMore && data.length <= visibleCount && (
+        <PanelSectionRow>
+          <div style={{padding:8, textAlign:"center", color:"#ffffff66", fontSize:11}}>Loading the rest of your library… ({data.length} so far)</div>
+        </PanelSectionRow>
+      )}
       {data.length === 0 && !loading && (
         <PanelSectionRow>
           <div style={{padding:20, textAlign:"center", color:"#ffffff44", fontSize:13}}>No {view} found.</div>
@@ -1264,6 +1414,7 @@ const Content = () => {
   const [navLoading, setNavLoading] = useState<"album"|"artist"|null>(null);
   const [trackToasts, setTrackToasts] = useState(true);
   const [autoplay, setAutoplayState] = useState(false);
+  const [allowExplicit, setAllowExplicitState] = useState<boolean | null>(null);
   const [musicTrimDb, setMusicTrimDb] = useState(-8);
   const [duckEnabled, setDuckEnabled] = useState(false);
   const [duckDepth, setDuckDepth] = useState(0.0);
@@ -1421,6 +1572,7 @@ const Content = () => {
         setSfInput(sf); setMutInput(mut);
         setTrackToasts(s.trackToasts ?? true);
         setAutoplayState((s as any).autoplay ?? false);
+        setAllowExplicitState(typeof (s as any).allowExplicit === "boolean" ? (s as any).allowExplicit : null);
         setMusicTrimDb((s as any).musicTrimDb ?? -8);
         setDuckEnabled((s as any).duckEnabled ?? false);
         setDuckDepth((s as any).duckDepth ?? 0.0);
@@ -1626,6 +1778,20 @@ const Content = () => {
           </div>
           <div style={{width:36,height:20,borderRadius:10,background:autoplay?"#fa2d48":"rgba(255,255,255,0.15)",position:"relative",flexShrink:0,transition:"background 0.2s"}}>
             <div style={{width:16,height:16,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:autoplay?18:2,transition:"left 0.2s"}} />
+          </div>
+        </FocusHighlight>
+
+        <FocusHighlight onActivate={async () => {
+          const next = allowExplicit !== true;
+          setAllowExplicitState(next);
+          try { await setExplicitAllowed(next); } catch {}
+        }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px",borderRadius:8,cursor:"pointer",marginBottom:8,border:"1px solid rgba(255,255,255,0.1)"}}>
+          <div>
+            <div style={{fontSize:13,color:"#fff"}}>Allow explicit content</div>
+            <div style={{fontSize:10,color:"#ffffff66",marginTop:2}}>{allowExplicit === null ? "Using Apple's default for your region" : allowExplicit ? "Songs marked explicit can be played" : "Explicit songs are blocked"}</div>
+          </div>
+          <div style={{width:36,height:20,borderRadius:10,background:allowExplicit===true?"#fa2d48":"rgba(255,255,255,0.15)",position:"relative",flexShrink:0,transition:"background 0.2s"}}>
+            <div style={{width:16,height:16,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:allowExplicit===true?18:2,transition:"left 0.2s"}} />
           </div>
         </FocusHighlight>
 

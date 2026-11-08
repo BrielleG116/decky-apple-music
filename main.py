@@ -262,12 +262,19 @@ class ChromeController:
         length = len(msg_bytes)
         if length < 126:
             frame.append(length | 0x80)
-        else:
+        elif length < 65536:
             frame.append(126 | 0x80)
             frame.extend(length.to_bytes(2, 'big'))
+        else:
+            # RFC 6455: payloads of 64 KiB or more use an 8-byte length. (Whole-library
+            # "Play all" sends thousands of song ids; the old 2-byte length truncated them.)
+            frame.append(127 | 0x80)
+            frame.extend(length.to_bytes(8, 'big'))
         frame.extend(mask_key)
-        for i in range(len(msg_bytes)):
-            frame.append(msg_bytes[i] ^ mask_key[i % 4])
+        # XOR-mask in bulk (a per-byte Python loop is slow for large messages)
+        key = (mask_key * (length // 4 + 1))[:length]
+        masked = (int.from_bytes(msg_bytes, 'big') ^ int.from_bytes(key, 'big')).to_bytes(length, 'big') if length else b''
+        frame.extend(masked)
         return frame
 
     async def _read_ws_response(self, reader, expected_id, timeout=10.0):
@@ -711,15 +718,128 @@ class ChromeController:
         """Run one login-drive action on the player's sign-in window."""
         return self._player_post("/logindrive", {"action": action, "value": value}) or {"ok": False, "error": "no player response"}
 
+    def _allow_explicit_setting(self):
+        """The user's explicit-content choice: True (allow), False (restrict) or None
+        (leave Apple's default for the storefront)."""
+        try:
+            p = os.path.join(decky_plugin.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    v = json.load(f).get("allowExplicit")
+                return v if isinstance(v, bool) else None
+        except Exception:
+            pass
+        return None
+
+    def _explicit_prelude(self):
+        """JS that applies the user's explicit-content choice to the live MusicKit session.
+
+        MusicKit restricts explicit content by default in some storefronts (br, ch, gt, hu,
+        id, in, it, kr, la, lt, my, ru, sg, tr) until the user opts in, and then fails with
+        "Content restricted". Its restrictedEnabled setter only RAISES the restriction, so
+        after changing it the user token is cleared and re-set so MusicKit recomputes its
+        authorization status.
+        """
+        allow = self._allow_explicit_setting()
+        if allow is None:
+            return ""
+        return """
+                    try {
+                        const __allow = __ALLOW__;
+                        if (mk.isRestricted === __allow) {
+                            const __tok = mk.musicUserToken;
+                            mk.restrictedEnabled = !__allow;
+                            if (__tok) { mk.musicUserToken = ''; mk.musicUserToken = __tok; }
+                            await new Promise(r => setTimeout(r, 400));
+                        }
+                    } catch (e) {}
+        """.replace("__ALLOW__", json.dumps(allow))
+
+    async def cdp_set_explicit(self, allow):
+        """Apply the explicit-content choice to the running player right now."""
+        script = """
+            (async function() {
+                try {
+                    const mk = window.MusicKit?.getInstance();
+                    if (!mk) return {success: false, error: 'No MusicKit'};
+                    const allow = __ALLOW__;
+                    const tok = mk.musicUserToken;
+                    mk.restrictedEnabled = !allow;
+                    if (tok) { mk.musicUserToken = ''; mk.musicUserToken = tok; }
+                    await new Promise(r => setTimeout(r, 500));
+                    return {success: true, isRestricted: !!mk.isRestricted, authorized: !!mk.isAuthorized};
+                } catch (e) { return {success: false, error: String((e && e.message) || e)}; }
+            })()
+        """.replace("__ALLOW__", json.dumps(bool(allow)))
+        return await self._cdp_eval(script) or {"success": False, "error": "player not ready"}
+
+    async def cdp_play_ids(self, ids, shuffle=False, start=True):
+        """Queue many catalog song ids at once (Play all / Shuffle all). Long lists are queued
+        in chunks of 1000: the first chunk starts playback, the rest are appended."""
+        ids = [str(i) for i in ids if str(i).isdigit()]
+        if not ids:
+            return {"success": False, "error": "No playable songs"}
+        script = """
+            (async function() {
+                try {
+                    const mk = window.MusicKit?.getInstance();
+                    if (!mk) return {success: false, error: 'No MusicKit'};
+                    __PRELUDE__
+                    const ids = __IDS__;
+                    const CH = 1000;
+                    let unavailable = 0, started = false, lastErr = null;
+                    // MusicKit rejects a whole setQueue/playLater when ANY id can't be resolved
+                    // (removed or region-locked songs). The error lists the offending ids, so drop
+                    // them and retry; the rest of the library still plays.
+                    const queueChunk = async (chunk, first) => {
+                        for (let attempt = 0; attempt < 8 && chunk.length; attempt++) {
+                            try {
+                                if (first) await mk.setQueue({songs: chunk}); else await mk.playLater({songs: chunk});
+                                return true;
+                            } catch (e) {
+                                lastErr = e;
+                                const m = /could not be resolved:\\s*([0-9,\\s]+)/i.exec(String((e && e.message) || e));
+                                if (!m) throw e;
+                                const bad = new Set(m[1].split(/[,\\s]+/).filter(Boolean));
+                                const before = chunk.length;
+                                chunk = chunk.filter(i => !bad.has(i));
+                                unavailable += before - chunk.length;
+                                if (chunk.length === before) throw e;
+                            }
+                        }
+                        return false;
+                    };
+                    for (let i = 0; i < ids.length; i += CH) {
+                        if (await queueChunk(ids.slice(i, i + CH), !started)) started = true;
+                    }
+                    if (!started) throw (lastErr || new Error('No playable songs'));
+                    mk.shuffleMode = __SHUFFLE__ ? 1 : 0;
+                    if (__START__) await mk.play();
+                    const queued = (mk.queue && mk.queue.items) ? mk.queue.items.length : 0;
+                    return {success: true, requested: ids.length, queued: queued, unavailable: unavailable,
+                            skipped: Math.max(0, ids.length - unavailable - queued), restricted: !!mk.isRestricted};
+                } catch (e) { return {success: false, error: String((e && e.message) || e)}; }
+            })()
+        """
+        script = (script.replace("__PRELUDE__", self._explicit_prelude())
+                        .replace("__IDS__", json.dumps(ids))
+                        .replace("__SHUFFLE__", "true" if shuffle else "false")
+                        .replace("__START__", "true" if start else "false"))
+        decky.logger.info(f"[DeckyAM] cdp_play_ids: {len(ids)} ids, shuffle={shuffle}")
+        res = await self._cdp_eval(script)
+        decky.logger.info(f"[DeckyAM] cdp_play_ids result: {res}")
+        return res or {"success": False, "error": "CDP eval returned None"}
+
     async def cdp_play_media(self, media_type, media_id):
         """Play a media item directly via MusicKit's setQueue on Chrome."""
         # All logic is in JS so MusicKit can resolve library→catalog IDs
+        explicit_prelude = self._explicit_prelude()
         script = f"""
             (async function() {{
                 try {{
                     const mk = window.MusicKit?.getInstance();
                     if (!mk) return {{success: false, error: 'No MusicKit'}};
-                    
+                    {explicit_prelude}
                     const mediaType = '{media_type}';
                     const mediaId = '{media_id}';
                     const isNumeric = /^\\d+$/.test(mediaId);
@@ -1046,6 +1166,7 @@ class Plugin:
             "musicUserToken": str(data.get("musicUserToken", "")),
             "trackToasts": bool(data.get("trackToasts", True)),
             "autoplay": bool(data.get("autoplay", False)),
+            "allowExplicit": data.get("allowExplicit") if isinstance(data.get("allowExplicit"), bool) else None,
             "musicTrimDb": float(data.get("musicTrimDb", -8.0)),
             "duckEnabled": bool(data.get("duckEnabled", False)),
             "duckDepth": float(data.get("duckDepth", 0.0)),
@@ -1123,6 +1244,42 @@ class Plugin:
             "success": False,
             "error": (result or {}).get("error", "Playback failed") if isinstance(result, dict) else "Playback failed",
         }
+
+    async def set_explicit_allowed(self, *args):
+        """Allow or restrict explicit content in the player. MusicKit restricts it by default
+        in some storefronts; the choice is saved and re-applied before every play."""
+        try:
+            allow = args[0] if args else True
+            if isinstance(allow, list):
+                allow = allow[0] if allow else True
+            allow = bool(allow)
+            data = self._read_settings()
+            data["allowExplicit"] = allow
+            with open(self.settingsFilePath, "w") as f:
+                json.dump(data, f)
+            res = await self.chrome.cdp_set_explicit(allow)
+            res = res if isinstance(res, dict) else {}
+            return {"success": True, "allowExplicit": allow,
+                    "applied": bool(res.get("success")), "isRestricted": res.get("isRestricted")}
+        except Exception as e:
+            decky.logger.error(f"[DeckyAM] set_explicit_allowed error: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def play_ids(self, *args):
+        """Queue a list of catalog song ids (Play all / Shuffle all)."""
+        try:
+            payload = args[0] if args else {}
+            if isinstance(payload, list):
+                payload = payload[0] if payload else {}
+            ids = [str(i) for i in (payload.get("ids") or [])]
+            shuffle = bool(payload.get("shuffle", False))
+            if shuffle:
+                import random
+                random.shuffle(ids)
+            return await self.chrome.cdp_play_ids(ids, shuffle=shuffle)
+        except Exception as e:
+            decky.logger.error(f"[DeckyAM] play_ids error: {e}")
+            return {"success": False, "error": str(e)}
 
     async def play_media(self, *args):
         """Play any media type directly via MusicKit's setQueue on Chrome."""
